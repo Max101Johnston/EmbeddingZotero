@@ -4,9 +4,9 @@
 
 [English](README.md)
 
-## 本仓库的第一个版本
+## 当前版本
 
-插件包版本为 **1.6.3**。本分支的主要改动：
+插件包版本为 **1.6.4**。本分支的主要改动：
 
 - 为 `qwen3.7-text-embedding` 发送配置的输出维度，并核对 API 实际返回的维度。
 - 扫描数据库中所有向量的维度，按维度显示向量数与文献数；仅对维度不符、仍存在于文库的文献重新嵌入。新向量成功写入前保留旧向量。
@@ -17,7 +17,7 @@
 
 ## 安装与使用
 
-1. 有 GitHub Release 安装包时可下载 `.xpi`；目前也可以按下方步骤从源码构建。
+1. 下载[最新 `.xpi` 安装包](https://github.com/Max101Johnston/EmbeddingZotero/releases/latest/download/zotero-mcp-plugin.xpi)，或按下方步骤从源码构建。
 2. 在 Zotero 的“工具 → 附加组件”中安装 `.xpi`，然后重启 Zotero。
 3. 打开“设置 → Zotero MCP Plugin”，按需启用 MCP 服务器。默认 Streamable HTTP 地址为 `http://127.0.0.1:23120/mcp`。
 4. 配置嵌入 API，点击“测试连接”，先确认模型实际输出的维度。

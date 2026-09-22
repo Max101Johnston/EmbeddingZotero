@@ -4,9 +4,9 @@ A Zotero plugin with an integrated Streamable HTTP MCP server and semantic searc
 
 [简体中文](README-zh.md)
 
-## First version in this repository
+## Current release
 
-The plugin package version is **1.6.3**. Changes in this fork include:
+The plugin package version is **1.6.4**. Changes in this fork include:
 
 - Send the configured output dimensions for `qwen3.7-text-embedding`, and verify the dimensions returned by the embedding API.
 - Inspect every stored embedding dimension, show counts by dimension, and selectively re-embed live library items with mismatched dimensions. Existing vectors remain until replacement succeeds.
@@ -17,7 +17,7 @@ The concurrent item setting does **not** impose a global cap on embedding API re
 
 ## Install
 
-1. Download a packaged `.xpi` from this repository's Releases page when available, or build it from source as shown below.
+1. Download the [latest `.xpi`](https://github.com/Max101Johnston/EmbeddingZotero/releases/latest/download/zotero-mcp-plugin.xpi), or build it from source as shown below.
 2. In Zotero, open **Tools → Add-ons**, install the `.xpi`, and restart Zotero.
 3. Open **Settings → Zotero MCP Plugin**. Enable the MCP server if needed. The default Streamable HTTP endpoint is `http://127.0.0.1:23120/mcp`.
 4. Configure the embedding API and use **Test Connection**. Confirm the actual output dimensions before building or repairing an index.

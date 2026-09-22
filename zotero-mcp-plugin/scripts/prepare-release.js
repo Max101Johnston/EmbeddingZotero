@@ -2,6 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,6 +11,9 @@ const rootDir = path.resolve(__dirname, "..");
 const packageJsonPath = path.join(rootDir, "package.json");
 const updateJsonPath = path.join(rootDir, "update.json");
 const updateBetaJsonPath = path.join(rootDir, "update-beta.json");
+const buildDir = path.join(rootDir, ".scaffold", "build");
+const builtUpdateJsonPath = path.join(buildDir, "update.json");
+const xpiPath = path.join(buildDir, "zotero-mcp-plugin.xpi");
 
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
 const {
@@ -18,40 +22,31 @@ const {
 } = packageJson;
 
 const repoUrl = "https://github.com/Max101Johnston/EmbeddingZotero";
+const isBeta = version.includes("-");
+const outputPath = isBeta ? updateBetaJsonPath : updateJsonPath;
 
-function generateUpdateJson(isBeta = false) {
-  const currentVersion = isBeta ? `${version}-beta.0` : version;
-  const updateLink = `${repoUrl}/releases/download/v${currentVersion}/zotero-mcp-plugin-${currentVersion}.xpi`;
-
-  return {
-    addons: {
-      [addonID]: {
-        updates: [
-          {
-            version: currentVersion,
-            update_link: updateLink,
-            applications: {
-              zotero: {
-                strict_min_version: "6.999",
-                strict_max_version: "10.99.99",
-              },
-            },
-          },
-        ],
-      },
-    },
-  };
+if (!fs.existsSync(xpiPath) || !fs.existsSync(builtUpdateJsonPath)) {
+  throw new Error("Build the plugin with npm run build before preparing a release.");
 }
 
-fs.writeFileSync(
-  updateJsonPath,
-  JSON.stringify(generateUpdateJson(false), null, 2),
-);
-fs.writeFileSync(
-  updateBetaJsonPath,
-  JSON.stringify(generateUpdateJson(true), null, 2),
-);
+const builtManifest = JSON.parse(fs.readFileSync(builtUpdateJsonPath, "utf8"));
+const updates = builtManifest.addons?.[addonID]?.updates;
+const expectedLink = `${repoUrl}/releases/download/v${version}/zotero-mcp-plugin.xpi`;
+const expectedHash = `sha512:${createHash("sha512")
+  .update(fs.readFileSync(xpiPath))
+  .digest("hex")}`;
 
-console.log(
-  `Generated update.json and update-beta.json for version ${version}`,
-);
+if (
+  !Array.isArray(updates) ||
+  updates.length !== 1 ||
+  updates[0].version !== version ||
+  updates[0].update_link !== expectedLink ||
+  updates[0].update_hash !== expectedHash
+) {
+  throw new Error(
+    "The built update manifest does not match the package version, repository, or XPI hash. Rebuild before releasing.",
+  );
+}
+
+fs.writeFileSync(outputPath, `${JSON.stringify(builtManifest, null, 2)}\n`);
+console.log(`Prepared ${path.basename(outputPath)} for v${version}`);

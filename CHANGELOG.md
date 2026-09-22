@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.4 — First installable GitHub Release
+
+- Publish the plugin XPI and its matching update manifest from this repository.
+- Validate the manifest download link and SHA-512 hash against the built XPI before release.
+- Keep stable and beta update channels within the EmbeddingZotero repository.
+
 ## 1.6.3 — Initial EmbeddingZotero source release
 
 - Support configurable output dimensions for `qwen3.7-text-embedding` and validate API responses.

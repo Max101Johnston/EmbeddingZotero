@@ -7,9 +7,9 @@ export default defineConfig({
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
-  updateURL: `https://github.com/Max101Johnston/EmbeddingZotero/releases/latest/download/${
-    pkg.version.includes("-") ? "update-beta.json" : "update.json"
-  }`,
+  updateURL: pkg.version.includes("-")
+    ? "https://raw.githubusercontent.com/Max101Johnston/EmbeddingZotero/main/zotero-mcp-plugin/update-beta.json"
+    : "https://github.com/Max101Johnston/EmbeddingZotero/releases/latest/download/update.json",
   xpiDownloadLink:
     "https://github.com/Max101Johnston/EmbeddingZotero/releases/download/v{{version}}/{{xpiName}}.xpi",
 
