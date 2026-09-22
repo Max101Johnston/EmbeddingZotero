@@ -1,0 +1,46 @@
+# Editor and OS files
+.vscode/
+.idea/
+.roo/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Dependencies and generated files
+**/node_modules/
+**/.scaffold/
+**/build/
+**/dist/
+*.tsbuildinfo
+.cache/
+coverage/
+
+# Logs and temporary files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+*.tmp
+*.temp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Zotero libraries and local indexes
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Packaged artifacts; publish installers as release assets
+*.xpi
+*.zip
+*.tar.gz
