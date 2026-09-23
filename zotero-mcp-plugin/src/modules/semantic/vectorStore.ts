@@ -1196,6 +1196,39 @@ export class VectorStore {
     ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey} (${cacheMsg})`);
   }
 
+  /** Remove rows for items no longer present in the active Zotero library. */
+  async pruneToLiveItems(liveItemKeys: Set<string>): Promise<number> {
+    await this.ensureInitialized();
+
+    // Include all four tables: older indexes can have status-only or cached-
+    // content-only items, and an interrupted migration can leave f32-only rows.
+    const rows = await this.db.queryAsync(`SELECT item_key FROM embeddings UNION SELECT item_key FROM vectors_f32 UNION SELECT item_key FROM index_status UNION SELECT item_key FROM content_cache`);
+    const staleKeys = (rows || [])
+      .map((row: any) => String(row.item_key))
+      .filter((key: string) => !liveItemKeys.has(key));
+    if (staleKeys.length === 0) return 0;
+
+    // Small transactions limit write locks on large indexes. A failed batch
+    // remains safe to retry at the next reconciliation.
+    const batchSize = 200;
+    for (let offset = 0; offset < staleKeys.length; offset += batchSize) {
+      const batch = staleKeys.slice(offset, offset + batchSize);
+      const placeholders = batch.map(() => '?').join(',');
+      await this.db.executeTransaction(async () => {
+        for (const table of ['embeddings', 'vectors_f32', 'index_status', 'content_cache']) {
+          await this.db.queryAsync(`DELETE FROM ${table} WHERE item_key IN (${placeholders})`, batch);
+        }
+      });
+      const removed = new Set(batch);
+      for (const cacheKey of this.vectorCache.keys()) {
+        if (removed.has(cacheKey.split('_')[0])) this.vectorCache.delete(cacheKey);
+      }
+    }
+
+    ztoolkit.log(`[VectorStore] Removed stale index data for ${staleKeys.length} items`);
+    return staleKeys.length;
+  }
+
   /**
    * Clear all vectors and index status (preserves content cache)
    * Use this for re-indexing while keeping extracted content

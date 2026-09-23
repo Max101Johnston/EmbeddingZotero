@@ -6,12 +6,13 @@ A Zotero plugin with an integrated Streamable HTTP MCP server and semantic searc
 
 ## Current release
 
-The plugin package version is **1.6.4**. Changes in this fork include:
+The plugin package version is **1.6.5**. Changes in this fork include:
 
 - Send the configured output dimensions for `qwen3.7-text-embedding`, and verify the dimensions returned by the embedding API.
 - Inspect every stored embedding dimension, show counts by dimension, and selectively re-embed live library items with mismatched dimensions. Existing vectors remain until replacement succeeds.
 - Configure item indexing concurrency from **1 to 1000** (default **5**) in the plugin preferences. A changed value takes effect on the next batch.
 - Reconcile the displayed indexed reference count with current Zotero items instead of counting stale index rows as live references.
+- Remove vectors, index status and cached content for items that have been trashed, permanently deleted or merged away. Startup and periodic checks catch missed events.
 
 The concurrent item setting does **not** impose a global cap on embedding API request rate. A document is divided into many text chunks, and several documents can send embedding requests at once. If the provider returns HTTP 429, lower concurrency and check the provider's current request and token limits.
 
@@ -24,6 +25,8 @@ The concurrent item setting does **not** impose a global cap on embedding API re
 5. In the **Index** section, use **Check Dimensions** to inspect the stored vectors. Use **Re-embed Mismatched Items** only when you intend to replace vectors produced at other dimensions. The operation calls the embedding API and may incur usage charges.
 
 This fork keeps the upstream Zotero add-on ID, so installing its `.xpi` replaces an installed copy of the original plugin. Back up your Zotero profile before changing versions.
+
+The index follows items still present in My Library. Removing an item from a collection leaves it in the library and retains its index. Cleanup does not call the embedding API; a current item has vectors only after successful indexing. SQLite may reuse freed pages, so the database file may not shrink immediately after cleanup.
 
 ## Build from source
 

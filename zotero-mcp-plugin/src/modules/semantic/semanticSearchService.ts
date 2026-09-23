@@ -414,6 +414,12 @@ export class SemanticSearchService {
         mode: reembedDimensions ? 'repair' : 'normal'
       };
 
+      // A full build also reconciles records left by Zotero trash/merge
+      // operations that happened while this plugin was stopped.
+      if (!itemKeys?.length) {
+        await this.reconcileWithLibrary();
+      }
+
       // Check for dimension mismatch before indexing (unless rebuild)
       if (!rebuild && !reembedDimensions) {
         const dimensionCheck = await this.checkDimensionCompatibility();
@@ -819,6 +825,8 @@ export class SemanticSearchService {
       return;
     }
 
+    if (await this.discardIfItemNoLongerActive(item)) return;
+
     // Calculate content hash
     contentHash = this.hashContent(content);
 
@@ -867,6 +875,11 @@ export class SemanticSearchService {
     });
     ztoolkit.log(`[SemanticSearch] indexItem() generated ${embeddings.size} embeddings`);
 
+    // A merge or trash action can happen while an embedding request is in
+    // flight. Do not resurrect the deleted item's vectors after the notifier
+    // has removed them.
+    if (await this.discardIfItemNoLongerActive(item)) return;
+
     // Store vectors
     const records = chunks.map((chunk, idx) => {
       const embedding = embeddings.get(`${item.key}_${idx}`);
@@ -895,6 +908,7 @@ export class SemanticSearchService {
 
   /** Regenerate one item's vectors while keeping the old vectors until the replacement is ready. */
   private async reembedItemWithProcessor(item: any, processor: PDFProcessor, dimensions: number): Promise<void> {
+    if (await this.discardIfItemNoLongerActive(item)) return;
     const timestamps = await this.getItemTimestamps(item);
     const status = await this.vectorStore.getIndexStatus(item.key);
     const cached = await this.vectorStore.getCachedContent(item.key);
@@ -946,10 +960,19 @@ export class SemanticSearchService {
     if (this._paused || this._aborted) {
       throw new EmbeddingAPIError('Indexing paused', 'paused');
     }
+    if (await this.discardIfItemNoLongerActive(item)) return;
     await this.vectorStore.replaceItemVectors(
       item.key, records, contentHash, timestamps.itemModified, timestamps.attachmentModified,
     );
     ztoolkit.log(`[SemanticSearch] Re-embedded ${item.key}: ${records.length} vectors at ${dimensions} dimensions`);
+  }
+
+  private async discardIfItemNoLongerActive(item: any): Promise<boolean> {
+    const current = await Zotero.Items.getByLibraryAndKeyAsync(Zotero.Libraries.userLibraryID, item.key);
+    if (current && !current.deleted) return false;
+    await this.vectorStore.deleteItemVectors(item.key, true);
+    ztoolkit.log(`[SemanticSearch] Skipped removed item ${item.key} during indexing`);
+    return true;
   }
 
   /**
@@ -968,6 +991,19 @@ export class SemanticSearchService {
     await this.initialize();
     await this.vectorStore.clear();
     ztoolkit.log('[SemanticSearch] Index cleared');
+  }
+
+  /** Remove indexed and cached rows whose Zotero items are no longer active. */
+  async reconcileWithLibrary(): Promise<number> {
+    await this.vectorStore.initialize();
+    // getAll includes regular items, notes and attachments. Preserving every
+    // live key avoids deleting explicitly indexed standalone attachments.
+    const items = await Zotero.Items.getAll(Zotero.Libraries.userLibraryID, false, false);
+    if (!Array.isArray(items)) throw new Error('Could not read the Zotero library for index reconciliation');
+    const liveKeys = new Set<string>(items.filter((item: any) => item && !item.deleted).map((item: any) => item.key));
+    const removed = await this.vectorStore.pruneToLiveItems(liveKeys);
+    if (removed > 0) ztoolkit.log(`[SemanticSearch] Reconciled index: removed ${removed} non-current items`);
+    return removed;
   }
 
   // ============ Status Methods ============
@@ -1514,7 +1550,7 @@ export class SemanticSearchService {
           Zotero.Libraries.userLibraryID,
           key
         );
-        if (item) items.push(item);
+        if (item && !item.deleted) items.push(item);
       } catch (e) {
         // Skip failed items
       }
@@ -1559,10 +1595,11 @@ export class SemanticSearchService {
       search.addCondition('itemType', 'isNot', 'annotation');
 
       const ids = await search.search();
-      return Zotero.Items.getAsync(ids);
+      const items = await Zotero.Items.getAsync(ids);
+      return (items || []).filter((item: any) => item && !item.deleted && item.isRegularItem?.());
     } catch (error) {
       ztoolkit.log(`[SemanticSearch] Error getting items: ${error}`, 'warn');
-      return [];
+      throw error;
     }
   }
 

@@ -162,8 +162,9 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
     if (extraData) {
       for (const id of itemIds) {
         const oldData = extraData[id];
-        if (oldData?.key) {
-          itemKeys.push(oldData.key);
+        const key = oldData?.key || oldData?.old?.key;
+        if (key) {
+          itemKeys.push(key);
         }
       }
     }
@@ -177,15 +178,38 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
 
     for (const itemKey of itemKeys) {
       try {
+        pendingAutoUpdateKeys.delete(itemKey);
         // Delete vectors and content cache (item is permanently deleted)
         await vectorStore.deleteItemVectors(itemKey, true);
         ztoolkit.log(`[MCP Plugin] Deleted index and cache for item: ${itemKey}`);
       } catch (e) {
-        // Ignore errors for items that weren't indexed
+        ztoolkit.log(`[MCP Plugin] Could not remove index for ${itemKey}: ${e}`, 'warn');
       }
     }
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error handling deleted items: ${error}`, 'warn');
+  }
+}
+
+/** Moving an item to Zotero's trash normally arrives as a modify event. */
+async function handleItemsTrashed(itemIds: number[]) {
+  try {
+    const items = Zotero.Items.get(itemIds);
+    const keys = items
+      .filter((item: any) => item?.deleted && item.key)
+      .map((item: any) => item.key);
+    if (keys.length === 0) return;
+
+    const { getVectorStore } = await import("./modules/semantic/vectorStore");
+    const vectorStore = getVectorStore();
+    for (const key of keys) {
+      pendingAutoUpdateKeys.delete(key);
+      await vectorStore.deleteItemVectors(key, true);
+    }
+    refreshSemanticColumn();
+    ztoolkit.log(`[MCP Plugin] Removed index data for ${keys.length} trashed items`);
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Error handling trashed items: ${error}`, 'warn');
   }
 }
 
@@ -205,11 +229,26 @@ function registerItemNotifier() {
       // Don't process during shutdown
       if (isShuttingDown) return;
 
-      // Don't process during auto-indexing (prevent loops)
-      if (isAutoIndexing) return;
-
       // Only process item events
       if (type !== 'item') return;
+
+      const numericIds = ids.map(id => typeof id === 'string' ? parseInt(id, 10) : id);
+
+      // Keep the database aligned even when automatic embedding is disabled.
+      // Zotero uses modify when an item is moved to the trash and delete when
+      // it is permanently erased.
+      if (event === 'delete') {
+        await handleItemsDeleted(numericIds, extraData);
+        refreshSemanticColumn();
+        return;
+      }
+      if (event === 'modify') {
+        await handleItemsTrashed(numericIds);
+        return;
+      }
+
+      // Add events during indexing can be triggered by the indexer itself.
+      if (isAutoIndexing) return;
 
       // Check if semantic search and auto-update are enabled
       const semanticOn = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
@@ -217,30 +256,21 @@ function registerItemNotifier() {
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
       if (!enabled) return;
 
-      // Only process add and delete events (not modify - to avoid loops)
-      if (event !== 'add' && event !== 'delete') return;
+      if (event !== 'add') return;
 
       ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
 
-      const numericIds = ids.map(id => typeof id === 'string' ? parseInt(id, 10) : id);
-
-      if (event === 'add') {
-        // For add events, schedule indexing for new items
-        const items = Zotero.Items.get(numericIds);
-        for (const item of items) {
-          // Only index regular items (not attachments, notes, etc.)
-          if (item.isRegularItem?.()) {
-            scheduleAutoUpdate(item.key);
-          } else if (item.isAttachment?.() && item.parentItemKey) {
-            // #100: a PDF attached after its parent was indexed must mark
-            // the parent dirty — the parent's dateModified doesn't change
-            scheduleAutoUpdate(item.parentItemKey);
-          }
+      // For add events, schedule indexing for new items.
+      const items = Zotero.Items.get(numericIds);
+      for (const item of items) {
+        // Only index regular items (not attachments, notes, etc.)
+        if (item.isRegularItem?.()) {
+          scheduleAutoUpdate(item.key);
+        } else if (item.isAttachment?.() && item.parentItemKey) {
+          // #100: a PDF attached after its parent was indexed must mark
+          // the parent dirty — the parent's dateModified doesn't change
+          scheduleAutoUpdate(item.parentItemKey);
         }
-      } else if (event === 'delete') {
-        // For delete events, remove index for deleted items
-        // Extract item keys from extraData (items are already deleted)
-        handleItemsDeleted(numericIds, extraData);
       }
     }
   }, ['item'], 'zotero-mcp-plugin-auto-update');
@@ -308,6 +338,17 @@ async function triggerAutoIndexBuild() {
   }
 
   try {
+    const { getSemanticSearchService } = await import("./modules/semantic");
+    const semanticService = getSemanticSearchService();
+    if (semanticService.isBuildActive()) {
+      ztoolkit.log("[MCP Plugin] An index build is already in flight, skipping reconciliation");
+      return;
+    }
+    // This runs at startup and every ten minutes, including when automatic
+    // embedding is off, so missed delete/merge events are eventually repaired.
+    const removed = await semanticService.reconcileWithLibrary();
+    if (removed > 0) refreshSemanticColumn();
+
     const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
     if (!enabled) {
       ztoolkit.log("[MCP Plugin] Auto-update disabled, skipping auto index check");
@@ -322,9 +363,6 @@ async function triggerAutoIndexBuild() {
     }
 
     ztoolkit.log("[MCP Plugin] Periodic auto-index check...");
-
-    const { getSemanticSearchService } = await import("./modules/semantic");
-    const semanticService = getSemanticSearchService();
 
     // Check if service is ready (API configured)
     const isReady = await semanticService.isReady();
