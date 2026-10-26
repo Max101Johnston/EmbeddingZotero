@@ -36,6 +36,13 @@ export default defineConfig({
         target: "firefox115",
         outfile: `.scaffold/build/addon/content/scripts/${pkg.config.addonRef}.js`,
       },
+      {
+        entryPoints: ["src/modules/semantic/vectorSearchWorker.ts"],
+        bundle: true,
+        target: "firefox115",
+        format: "iife",
+        outfile: ".scaffold/build/addon/content/scripts/vector-search-worker.js",
+      },
     ],
   },
 

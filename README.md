@@ -6,8 +6,10 @@ A Zotero plugin with an integrated Streamable HTTP MCP server and semantic searc
 
 ## Current release
 
-The plugin package version is **1.6.5**. Changes in this fork include:
+The plugin package version is **1.6.6**. Changes in this fork include:
 
+- Share each vector search across a configurable Worker pool (default **4**, range **1–32**).
+- Follow MCP client cancellation to remove queued tasks, stop active Workers and embedding requests, and retain in-flight database operations until they settle.
 - Send the configured output dimensions for `qwen3.7-text-embedding`, and verify the dimensions returned by the embedding API.
 - Inspect every stored embedding dimension, show counts by dimension, and selectively re-embed live library items with mismatched dimensions. Existing vectors remain until replacement succeeds.
 - Configure item indexing concurrency from **1 to 1000** (default **5**) in the plugin preferences. A changed value takes effect on the next batch.

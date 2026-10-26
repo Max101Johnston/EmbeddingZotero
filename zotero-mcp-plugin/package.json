@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "Zotero MCP Plugin",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -31,6 +31,7 @@
     "release:init": "node scripts/init-release.js",
     "test": "zotero-plugin test",
     "test:unit": "mocha",
+    "test:concurrency": "node scripts/test-concurrency.mjs",
     "test:update": "node scripts/test-update.js",
     "update-deps": "npm update --save"
   },

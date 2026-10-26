@@ -1,3 +1,4 @@
+import { abortableDelay, abortableHttpRequest, throwIfAborted } from "../requestLifecycle";
 /**
  * Embedding Service for Semantic Search
  *
@@ -675,7 +676,7 @@ export class EmbeddingService {
    * @param waitMs - Milliseconds to wait
    * @param reason - Reason for waiting
    */
-  private async waitForRateLimit(waitMs: number, reason: string): Promise<void> {
+  private async waitForRateLimit(waitMs: number, reason: string, signal?: AbortSignal): Promise<void> {
     this.usageStats.rateLimitHits++;
     this.saveUsageStats();
 
@@ -690,7 +691,7 @@ export class EmbeddingService {
       });
     }
 
-    await new Promise(resolve => setTimeout(resolve, waitMs));
+    await abortableDelay(waitMs, signal);
   }
 
   /**
@@ -812,9 +813,11 @@ export class EmbeddingService {
    * @param isQuery - Not used for API-based embedding, kept for interface compatibility
    * @throws {EmbeddingAPIError} When API call fails
    */
-  async embed(text: string, language?: 'zh' | 'en' | 'auto', _isQuery: boolean = false): Promise<EmbeddingResult> {
+  async embed(text: string, language?: 'zh' | 'en' | 'auto', _isQuery: boolean = false, signal?: AbortSignal): Promise<EmbeddingResult> {
     const startTime = Date.now();
+    throwIfAborted(signal);
     await this.initialize();
+    throwIfAborted(signal);
 
     // Detect language for tracking (API doesn't need language-specific models)
     const detectedLang = language === 'auto' || !language
@@ -837,7 +840,7 @@ export class EmbeddingService {
     }
 
     try {
-      const embeddings = await this.callEmbeddingAPI([text]);
+      const embeddings = await this.callEmbeddingAPI([text], signal);
       const embedding = embeddings[0];
 
       const elapsed = Date.now() - startTime;
@@ -849,6 +852,7 @@ export class EmbeddingService {
         dimensions: embedding.length
       };
     } catch (error) {
+      throwIfAborted(signal);
       // Re-throw if already an EmbeddingAPIError
       if (error instanceof EmbeddingAPIError) {
         this.status.lastError = error.message;
@@ -1105,7 +1109,8 @@ export class EmbeddingService {
    * Call the embedding API using Zotero.HTTP
    * @throws {EmbeddingAPIError} When API call fails after all retries
    */
-  private async callEmbeddingAPI(texts: string[]): Promise<number[][]> {
+  private async callEmbeddingAPI(texts: string[], signal?: AbortSignal): Promise<number[][]> {
+    throwIfAborted(signal);
     // Validate and clean input texts
     const cleanTexts = texts.map(t => t.trim()).filter(t => t.length > 0);
     if (cleanTexts.length === 0) {
@@ -1131,7 +1136,7 @@ export class EmbeddingService {
     // Check rate limits before making request
     const rateCheck = this.checkRateLimit(estimatedTokens);
     if (!rateCheck.canProceed) {
-      await this.waitForRateLimit(rateCheck.waitMs, rateCheck.reason || 'Rate limit');
+      await this.waitForRateLimit(rateCheck.waitMs, rateCheck.reason || 'Rate limit', signal);
     }
 
     // Build request body based on provider
@@ -1173,6 +1178,7 @@ export class EmbeddingService {
     ztoolkit.log(`[EmbeddingService] Request details: texts=${texts.length}, totalTextChars=${totalTextLength}, bodySize=${requestBodySize}, model=${this.config.model}`);
 
     for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
+      throwIfAborted(signal);
       try {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json'
@@ -1186,12 +1192,13 @@ export class EmbeddingService {
         ztoolkit.log(`[EmbeddingService] Sending request attempt ${attempt + 1}/${this.config.maxRetries} to ${url}`);
 
         // Use Zotero.HTTP.request which is available in Zotero environment
-        const response = await Zotero.HTTP.request('POST', url, {
+        const response = await abortableHttpRequest<any>((requestObserver) => Zotero.HTTP.request('POST', url, {
+          requestObserver,
           headers,
           body: requestBodyStr,
           timeout: this.config.timeout,
           responseType: 'json'
-        });
+        }), signal);
 
         ztoolkit.log(`[EmbeddingService] Response received: status=${response.status}`);
 
@@ -1270,6 +1277,7 @@ export class EmbeddingService {
         return embeddings;
 
       } catch (error: any) {
+        throwIfAborted(signal);
         // Log raw error details for debugging.
         // NOTE: the request uses responseType 'json', so accessing
         // xhr.responseText throws InvalidStateError — read the parsed
@@ -1356,7 +1364,7 @@ export class EmbeddingService {
         if (lastError.type === 'rate_limit') {
           this.usageStats.rateLimitHits++;
           const waitMs = lastError.retryAfterMs || 60000;
-          await this.waitForRateLimit(waitMs, 'API returned 429 rate limit');
+          await this.waitForRateLimit(waitMs, 'API returned 429 rate limit', signal);
           continue; // retry immediately after waiting
         }
 
@@ -1364,7 +1372,7 @@ export class EmbeddingService {
         if (attempt < this.config.maxRetries - 1) {
           const delay = Math.pow(2, attempt) * 1000;
           ztoolkit.log(`[EmbeddingService] Waiting ${delay}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await abortableDelay(delay, signal);
         }
       }
     }

@@ -3,6 +3,7 @@
  * Manages user preferences for AI client compatibility and content processing
  */
 
+import { parseSearchWorkers, getSearchWorkers } from "./executionPreferences";
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
@@ -67,6 +68,7 @@ export class MCPSettingsService {
 
   // Simplified default settings with unified mode system
   private static readonly DEFAULTS: Record<string, any> = {
+    'execution.searchWorkers': 4,
     'ai.maxTokens': 10000,
     'ui.includeMetadata': true,
     // Unified content mode (replaces the old preset + output mode system)
@@ -153,6 +155,9 @@ export class MCPSettingsService {
       ai: {
         maxTokens: this.get('ai.maxTokens')
       },
+      execution: {
+        searchWorkers: getSearchWorkers(),
+      },
       content: {
         mode: this.get('content.mode')
       },
@@ -180,6 +185,9 @@ export class MCPSettingsService {
    */
   static updateSettings(newSettings: any): void {
     try {
+      if (newSettings.execution) {
+        Object.entries(newSettings.execution).forEach(([key, value]) => this.set(`execution.${key}`, value));
+      }
       if (newSettings.ai) {
         Object.entries(newSettings.ai).forEach(([key, value]) => {
           this.set(`ai.${key}`, value);
@@ -383,6 +391,9 @@ export class MCPSettingsService {
    */
   private static validateSetting(key: string, value: any): { valid: boolean; error?: string } {
     switch (key) {
+      case 'execution.searchWorkers':
+        if (typeof value !== 'number' || parseSearchWorkers(value) === null) return { valid: false, error: 'searchWorkers must be an integer from 1 to 32' };
+        break;
       case 'ai.maxTokens':
         if (typeof value !== 'number' || value < 1000 || value > 100000) {
           return { valid: false, error: 'maxTokens must be a number between 1000 and 100000' };

@@ -1,3 +1,4 @@
+import { throwIfAborted } from "../requestLifecycle";
 /**
  * Semantic Search Service for Zotero MCP Plugin
  *
@@ -24,6 +25,7 @@ const PREF_INDEX_PROGRESS = 'extensions.zotero.zotero-mcp-plugin.semantic.indexP
 // ============ Interfaces ============
 
 export interface SemanticSearchOptions {
+  signal?: AbortSignal;
   topK?: number;              // Number of results
   minScore?: number;          // Minimum similarity threshold
   language?: 'zh' | 'en' | 'all';  // Language filter
@@ -233,7 +235,9 @@ export class SemanticSearchService {
     query: string,
     options: SemanticSearchOptions = {}
   ): Promise<SemanticSearchResult[]> {
+    throwIfAborted(options.signal);
     await this.initialize();
+    throwIfAborted(options.signal);
 
     const {
       topK = 10,
@@ -248,7 +252,7 @@ export class SemanticSearchService {
     try {
       // 1. Generate query embedding (isQuery=true for BGE instruction prefix)
       ztoolkit.log(`[SemanticSearch] Step 1: Generating query embedding...`);
-      const queryEmbedding = await this.embeddingService.embed(query, 'auto', true);
+      const queryEmbedding = await this.embeddingService.embed(query, 'auto', true, options.signal);
       ztoolkit.log(`[SemanticSearch] Query embedding: lang=${queryEmbedding.language}, dims=${queryEmbedding.dimensions}`);
 
       // 2. Vector search - use detected language when language option is 'all' for better performance
@@ -259,7 +263,8 @@ export class SemanticSearchService {
         topK: topK * 3,  // Get more for deduplication
         language: searchLanguage,
         itemKeys,
-        minScore
+        minScore,
+        signal: options.signal,
       });
       ztoolkit.log(`[SemanticSearch] Vector search returned ${vectorResults.length} results`);
 
@@ -306,7 +311,7 @@ export class SemanticSearchService {
         }));
 
       // 5. Fill in item metadata
-      await this.fillItemMetadata(finalResults);
+      await this.fillItemMetadata(finalResults, options.signal);
 
       const searchTime = Date.now() - startTime;
       ztoolkit.log(`[SemanticSearch] Found ${finalResults.length} results in ${searchTime}ms`);
@@ -324,15 +329,18 @@ export class SemanticSearchService {
    */
   async findSimilar(
     itemKey: string,
-    options: { topK?: number; minScore?: number } = {}
+    options: { topK?: number; minScore?: number; signal?: AbortSignal } = {}
   ): Promise<SemanticSearchResult[]> {
+    throwIfAborted(options.signal);
     await this.initialize();
+    throwIfAborted(options.signal);
 
     const { topK = 5, minScore = 0.3 } = options;  // Lowered from 0.5
 
     try {
       // Get item's vectors
-      const itemVectors = await this.vectorStore.getItemVectors(itemKey);
+      const itemVectors = await this.vectorStore.getItemVectors(itemKey, options.signal);
+      throwIfAborted(options.signal);
 
       if (itemVectors.length === 0) {
         ztoolkit.log(`[SemanticSearch] Item ${itemKey} not indexed`);
@@ -345,7 +353,8 @@ export class SemanticSearchService {
       // Search for similar
       const results = await this.vectorStore.search(queryVector, {
         topK: topK + 1,
-        minScore
+        minScore,
+        signal: options.signal,
       });
 
       // Filter out the source item and map results
@@ -364,7 +373,7 @@ export class SemanticSearchService {
         }));
 
       // Fill metadata
-      await this.fillItemMetadata(filteredResults);
+      await this.fillItemMetadata(filteredResults, options.signal);
 
       return filteredResults;
 
@@ -1011,20 +1020,27 @@ export class SemanticSearchService {
   /**
    * Get service statistics
    */
-  async getStats(): Promise<SemanticServiceStats> {
+  async getStats(signal?: AbortSignal): Promise<SemanticServiceStats> {
+    throwIfAborted(signal);
     await this.initialize();
+    throwIfAborted(signal);
 
-    const indexStats = await this.vectorStore.getStats();
+    const indexStats = await this.vectorStore.getStats(signal);
     const embeddingStatus = this.embeddingService.getStatus();
 
     let libraryStats: SemanticServiceStats['libraryStats'];
     try {
       const regularItems = await this.getItemsWithContent();
+      throwIfAborted(signal);
       const regularKeys = new Set(regularItems.map((item: any) => item.key));
+      throwIfAborted(signal);
       const vectorKeys = await this.vectorStore.getVectorItemKeys();
       const indexedRegularItems = [...vectorKeys].filter(key => regularKeys.has(key)).length;
+      throwIfAborted(signal);
       const standaloneAttachments = await this.getStandaloneItemCount('attachment');
+      throwIfAborted(signal);
       const standaloneNotes = await this.getStandaloneItemCount('note');
+      throwIfAborted(signal);
       libraryStats = {
         topLevelItems: regularItems.length + standaloneAttachments + standaloneNotes,
         regularItems: regularItems.length,
@@ -1035,6 +1051,7 @@ export class SemanticSearchService {
         nonCurrentIndexItems: vectorKeys.size - indexedRegularItems
       };
     } catch (e) {
+      throwIfAborted(signal);
       ztoolkit.log(`[SemanticSearch] Could not reconcile index with library: ${e}`, 'warn');
     }
 
@@ -1497,8 +1514,9 @@ export class SemanticSearchService {
   /**
    * Fill in item metadata for search results
    */
-  private async fillItemMetadata(results: SemanticSearchResult[]): Promise<void> {
+  private async fillItemMetadata(results: SemanticSearchResult[], signal?: AbortSignal): Promise<void> {
     for (let index = results.length - 1; index >= 0; index--) {
+      throwIfAborted(signal);
       const result = results[index];
       try {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
@@ -1506,6 +1524,7 @@ export class SemanticSearchService {
           result.itemKey
         );
 
+        throwIfAborted(signal);
         // Old vectors can remain after an item is moved to the trash while
         // automatic indexing is off. Never return those entries as live hits.
         if (!item || item.deleted) {

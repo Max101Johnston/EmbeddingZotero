@@ -1,4 +1,5 @@
 // This implementation is based strictly on the user-provided sample code.
+import { TaskError, abortReason, throwIfAborted } from "./requestLifecycle";
 declare const Zotero: any;
 declare const IOUtils: any; // Trusting this is available in the execution context.
 declare const ztoolkit: ZToolkit;
@@ -43,7 +44,9 @@ export class PDFProcessor {
       const message = event.data;
 
       if (message.responseID) {
-        const { resolve, reject } = this._waitingPromises[message.responseID];
+        const pending = this._waitingPromises[message.responseID];
+        if (!pending) return; // A timed-out/cancelled query may still have posted a response.
+        const { resolve, reject } = pending;
         delete this._waitingPromises[message.responseID];
 
         if (message.data) {
@@ -104,7 +107,7 @@ export class PDFProcessor {
           this.ztoolkit.log("Failed to fetch font data:", e, "error");
         }
 
-        this._worker!.postMessage({ responseID: message.id, data: respData });
+        this._worker?.postMessage({ responseID: message.id, data: respData });
       }
     });
 
@@ -144,7 +147,9 @@ export class PDFProcessor {
     data: unknown,
     transfer?: ArrayBuffer[],
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<T> {
+    throwIfAborted(signal);
     this._init();
     return new Promise<T>((resolve, reject) => {
       this._lastPromiseID++;
@@ -152,33 +157,32 @@ export class PDFProcessor {
 
       // Set up timeout
       const effectiveTimeoutMs = timeoutMs ?? this._getTimeoutMs();
-      const timeoutId = setTimeout(() => {
-        if (this._waitingPromises[promiseID]) {
-          delete this._waitingPromises[promiseID];
-          reject(
-            new Error(`PDF processing timed out after ${effectiveTimeoutMs}ms`),
-          );
-        }
-      }, effectiveTimeoutMs);
+      const onAbort = () => this.terminate(abortReason(signal));
+      const timeoutId = setTimeout(() => this.terminate(
+        new TaskError(-32001, `PDF processing timed out after ${effectiveTimeoutMs}ms`),
+      ), effectiveTimeoutMs);
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", onAbort);
+      };
 
       this._waitingPromises[promiseID] = {
         resolve: (value: T) => {
-          clearTimeout(timeoutId);
+          cleanup();
           resolve(value);
         },
         reject: (reason?: any) => {
-          clearTimeout(timeoutId);
+          cleanup();
           reject(reason);
         }
       };
+      signal?.addEventListener("abort", onAbort, { once: true });
 
-      if (transfer) {
-        this._worker!.postMessage(
-          { id: promiseID, action, data },
-          transfer,
-        );
-      } else {
-        this._worker!.postMessage({ id: promiseID, action, data });
+      try {
+        if (transfer) this._worker!.postMessage({ id: promiseID, action, data }, transfer);
+        else this._worker!.postMessage({ id: promiseID, action, data });
+      } catch (error) {
+        this.terminate(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }
@@ -188,12 +192,14 @@ export class PDFProcessor {
    * @param path PDF文件路径
    * @returns Promise<string> 提取的文本内容
    */
-  async extractText(path: string): Promise<string> {
+  async extractText(path: string, signal?: AbortSignal): Promise<string> {
+    throwIfAborted(signal);
     try {
       this.ztoolkit.log("[PDFProcessor] 开始提取文本:", { path });
 
       // Using IOUtils.read directly as per the sample code.
       const fileData = await IOUtils.read(path);
+      throwIfAborted(signal);
       if (!fileData) {
         throw new Error("文件读取失败 (IOUtils.read returned falsy)");
       }
@@ -210,6 +216,8 @@ export class PDFProcessor {
           password: undefined,
         },
         [fileData.buffer],
+        undefined,
+        signal,
       );
 
       if (!response?.text) {
@@ -224,7 +232,10 @@ export class PDFProcessor {
     }
   }
 
-  public terminate(): void {
+  public terminate(reason: Error = new TaskError(-32800, "PDF worker terminated")): void {
+    const pending = this._waitingPromises;
+    this._waitingPromises = {};
+    for (const promise of Object.values(pending)) promise.reject(reason);
     if (this._worker) {
       this._worker.terminate();
       this._worker = null;

@@ -148,6 +148,7 @@ export class HttpServer {
 
   private cleanupMCPServer(): void {
     if (this.mcpServer) {
+      this.mcpServer.shutdown();
       this.mcpServer = null;
       ztoolkit.log("[HttpServer] MCP server cleaned up");
     }
@@ -419,7 +420,7 @@ export class HttpServer {
             if (method === "POST") {
               // Handle MCP requests via streamable HTTP
               if (this.mcpServer) {
-                result = await this.mcpServer.handleMCPRequest(requestBody);
+                result = await this.mcpServer.handleMCPRequest(requestBody, sessionId);
               } else {
                 result = {
                   status: 503,

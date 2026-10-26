@@ -2,6 +2,7 @@ import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 import { ClientConfigGenerator } from "./clientConfigGenerator";
 import { getIndexConcurrency, INDEX_CONCURRENCY_PREF, parseIndexConcurrency } from "./semantic/indexConcurrency";
+import { getSearchWorkers, SEARCH_WORKERS_PREF, parseSearchWorkers } from "./executionPreferences";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -163,6 +164,7 @@ function bindPrefEvents() {
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-include-metadata`, "extensions.zotero.zotero-mcp-plugin.ui.includeMetadata");
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-semantic-auto-update`, "extensions.zotero.zotero-mcp-plugin.semantic.autoUpdate");
   bindIndexConcurrency(doc);
+  bindExecutionPreferences(doc);
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-custom-include-webpage`, "extensions.zotero.zotero-mcp-plugin.custom.includeWebpage");
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-custom-enable-compression`, "extensions.zotero.zotero-mcp-plugin.custom.enableCompression");
 
@@ -1162,6 +1164,25 @@ function updateEmbeddingServiceRateLimits() {
     ztoolkit.log(`[PreferenceScript] Updated embedding service rate limits`);
   } catch (error) {
     ztoolkit.log(`[PreferenceScript] Failed to update rate limits: ${error}`, "warn");
+  }
+}
+
+/** Bind search worker count independently of indexing concurrency. */
+function bindExecutionPreferences(doc: Document) {
+  const settings = [
+    { suffix: "search-workers", key: SEARCH_WORKERS_PREF, read: getSearchWorkers, parse: parseSearchWorkers, message: "pref-search-workers-invalid" },
+  ];
+  for (const setting of settings) {
+    const input = doc.querySelector(`#zotero-prefpane-${config.addonRef}-${setting.suffix}`) as HTMLInputElement;
+    if (!input) continue;
+    input.value = String(setting.read());
+    input.addEventListener("change", () => {
+      const value = setting.parse(input.value);
+      if (value === null) {
+        input.value = String(setting.read());
+        addon.data.prefs!.window.alert(getString(setting.message as any));
+      } else Zotero.Prefs.set(setting.key, value, true);
+    });
   }
 }
 

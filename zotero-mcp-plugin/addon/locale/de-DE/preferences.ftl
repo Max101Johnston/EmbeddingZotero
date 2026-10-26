@@ -248,3 +248,7 @@ pref-contact-title = Kontaktinformationen
 pref-contact-email = E-Mail: fransjone@mail.com
 pref-contact-github = GitHub: https://github.com/Max101Johnston/EmbeddingZotero
 pref-contact-wechat = WeChat: 未来论文实验室
+
+pref-search-workers-label = Search workers
+pref-search-workers-hint = Workers per vector query (1–32, default 4). Applies to the next query.
+pref-search-workers-invalid = Enter an integer from 1 to 32.

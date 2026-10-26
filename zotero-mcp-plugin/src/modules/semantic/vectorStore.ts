@@ -5,6 +5,11 @@
  * Stores embeddings as BLOBs and performs similarity search in memory.
  */
 
+import { getSearchWorkers } from "../executionPreferences";
+import { abortableDelay, throwIfAborted } from "../requestLifecycle";
+import { VectorSearchPool } from "./vectorSearchPool";
+import type { SearchVector } from "./vectorSearchMath";
+
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 declare let PathUtils: any;
@@ -70,6 +75,7 @@ let vectorStoreInstanceCounter = 0;
 export class VectorStore {
   private dbPath: string = '';
   private db: any = null;
+  private searchPool: VectorSearchPool | null = null;
   private initialized: boolean = false;
   private initPromise: Promise<void> | null = null;
 
@@ -582,254 +588,88 @@ export class VectorStore {
       language?: 'zh' | 'en' | 'all';
       itemKeys?: string[];
       minScore?: number;
+      signal?: AbortSignal;
     } = {}
   ): Promise<SearchResult[]> {
+    const { topK = 10, language = 'all', itemKeys, minScore = 0, signal } = options;
+    throwIfAborted(signal);
     await this.ensureInitialized();
+    throwIfAborted(signal);
+    if (topK <= 0 || this.prepareQueryVector(queryVector).norm === 0) return [];
+    this.searchPool ??= new VectorSearchPool();
 
-    const { topK = 10, language = 'all', itemKeys, minScore = 0 } = options;
-    const startTime = Date.now();
-
-    ztoolkit.log(`[VectorStore] search() start: instanceId=${this.instanceId}, topK=${topK}, lang=${language}, minScore=${minScore}, queryDims=${queryVector.length}`);
-
-    // Build query conditions
-    const conditions: string[] = ['1=1'];
-    const params: any[] = [];
-
-    if (language !== 'all') {
-      conditions.push('language = ?');
-      params.push(language);
-    }
-
-    if (itemKeys && itemKeys.length > 0) {
-      const placeholders = itemKeys.map(() => '?').join(',');
-      conditions.push(`item_key IN (${placeholders})`);
-      params.push(...itemKeys);
-    }
-
-    // Mixed historical indexes are searchable for the matching dimension.
-    conditions.push('dimensions = ?');
-    params.push(queryVector.length);
-
-    // Optimized batch size: 50,000 vectors per chunk
-    // Memory: 50k × 2560 dims × 1 byte = ~128MB for Int8 data
-    const BATCH_SIZE = 50000;
-    let offset = 0;
-    let totalScanned = 0;
-    let batchCount = 0;
-
-    // Get total count first
-    const whereClause = conditions.join(' AND ');
-    const totalCount = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings WHERE ${whereClause}`, params);
-    ztoolkit.log(`[VectorStore] search() total vectors: ${totalCount}, batch size: ${BATCH_SIZE}`);
-
-    if (!totalCount || totalCount === 0) {
-      ztoolkit.log(`[VectorStore] search() no vectors found`);
-      return [];
-    }
-
-    // Check if Int8 data is available (for backward compatibility)
-    const hasInt8 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL AND ${whereClause}`, params);
-    const useInt8 = hasInt8 > 0 && hasInt8 >= totalCount * 0.9; // Use Int8 if >90% have it
-
-    ztoolkit.log(`[VectorStore] search() using ${useInt8 ? 'Int8 optimized' : 'Float32 fallback'} search (${hasInt8}/${totalCount} have Int8)`);
-
-    // Pre-compute query vector data
-    const queryQuantized = this.quantizeWithNorm(queryVector);
-    const { normalized: normalizedQuery, norm: queryNorm } = this.prepareQueryVector(queryVector);
-
-    if (queryNorm === 0) {
-      ztoolkit.log(`[VectorStore] search() query vector has zero norm, returning empty results`);
-      return [];
-    }
-
-    // Debug: log query vector info
-    const querySample = queryVector.slice(0, 5);
-    const queryInt8Sample = queryQuantized.int8Data.slice(0, 5);
-    // Compute max abs safely (avoid spread operator stack overflow on large arrays)
-    let queryMaxAbs = 0;
-    for (let i = 0; i < queryVector.length; i++) {
-      const abs = Math.abs(queryVector[i]);
-      if (abs > queryMaxAbs) queryMaxAbs = abs;
-    }
-    ztoolkit.log(`[VectorStore] search() query: float32[0:5]=[${Array.from(querySample).map(v => v.toFixed(4))}], int8[0:5]=[${Array.from(queryInt8Sample)}], norm=${queryNorm.toFixed(4)}, scale=${queryMaxAbs > 0 ? (127 / queryMaxAbs).toFixed(4) : 'N/A'}`);
-
-
-    // Min-heap to track top K results efficiently
-    const minHeap: SearchResult[] = [];
-
-    // Track debug info for first few vectors
-    let debugSampleCount = 0;
-    const MAX_DEBUG_SAMPLES = 3;
-    // Track score statistics for debugging
-    let scoreSum = 0;
-    let scoreCount = 0;
-    let scoreMax = -Infinity;
-    let scoreMin = Infinity;
-    let nanCount = 0;
-
-    // Process in large batches (chunked streaming)
-    while (offset < totalCount) {
-      batchCount++;
-      const batchStartTime = Date.now();
-      const batchParams = [...params, BATCH_SIZE, offset];
-
-      // Select appropriate columns based on availability
-      // Float32 vectors are in vectors_f32 table — only load when needed (fallback path)
-      const selectCols = useInt8
+    // The whole scan owns one worker group. Cancelled queued scans are removed
+    // before they issue SQL; an in-flight SQL call must settle before reuse.
+    return this.searchPool.run(getSearchWorkers(), signal, async (lease) => {
+      const started = Date.now();
+      const db = this.db;
+      const conditions = ['1=1'];
+      const params: any[] = [];
+      if (language !== 'all') { conditions.push('language = ?'); params.push(language); }
+      if (itemKeys?.length) {
+        conditions.push(`item_key IN (${itemKeys.map(() => '?').join(',')})`);
+        params.push(...itemKeys);
+      }
+      conditions.push('dimensions = ?');
+      params.push(queryVector.length);
+      const where = conditions.join(' AND ');
+      const valueQuery = async (sql: string): Promise<number> => {
+        throwIfAborted(signal);
+        const value = await db.valueQueryAsync(sql, params);
+        throwIfAborted(signal);
+        return value || 0;
+      };
+      const total = await valueQuery(`SELECT COUNT(*) FROM embeddings WHERE ${where}`);
+      if (!total) return [];
+      const int8Count = await valueQuery(`SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL AND ${where}`);
+      const useInt8 = int8Count > 0 && int8Count >= total * 0.9;
+      const columns = useInt8
         ? 'item_key, chunk_id, vector_int8, vector_scale, vector_norm, language, chunk_text, dimensions'
         : 'item_key, chunk_id, language, chunk_text, dimensions';
-
-      const rows = await this.db.queryAsync(`SELECT ${selectCols} FROM embeddings WHERE ${whereClause} LIMIT ? OFFSET ?`, batchParams);
-
-      if (!rows || rows.length === 0) {
-        ztoolkit.log(`[VectorStore] search() batch ${batchCount} returned no rows at offset ${offset}`);
-        break;
-      }
-
-      const ioTime = Date.now() - batchStartTime;
-      const computeStartTime = Date.now();
-
-      // Process this batch
-      for (const row of rows) {
-        try {
-          let score: number;
-
-          // Check dimension match - query and stored must have same dimensions
-          const queryDims = queryVector.length;
-          const storedDims = row.dimensions;
-
-          if (useInt8 && row.vector_int8 && row.vector_norm && queryDims === storedDims) {
-            // Optimized Int8 path with pre-computed norm
-            const storedInt8 = this.bufferToInt8Array(row.vector_int8, row.dimensions);
-
-            // Verify decoded array length matches expected dimensions
-            if (storedInt8.length !== queryQuantized.int8Data.length) {
-              // Length mismatch - fall back to Float32 from vectors_f32 table
-              const f32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-              if (f32Row && f32Row.length > 0) {
-                const storedVector = this.bufferToFloat32Array(f32Row[0].vector, row.dimensions);
-                score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedVector);
-              } else {
-                continue; // Skip this vector — no fallback available
-              }
-              if (debugSampleCount === 0) {
-                ztoolkit.log(`[VectorStore] WARNING: Int8 length mismatch: query=${queryQuantized.int8Data.length}, stored=${storedInt8.length}, using Float32 fallback from vectors_f32`);
-              }
+      const bytes = (value: any): Uint8Array => value instanceof Uint8Array ? value
+        : value instanceof ArrayBuffer ? new Uint8Array(value)
+          : value?.buffer ? new Uint8Array(value.buffer) : new Uint8Array(value);
+      const best: Array<SearchResult & { index: number }> = [];
+      // Preserve the existing batch size and retrieval/filtering semantics.
+      const BATCH_SIZE = 50000;
+      for (let offset = 0; offset < total;) {
+        throwIfAborted(signal);
+        const batchStarted = Date.now();
+        const rows = await db.queryAsync(`SELECT ${columns} FROM embeddings WHERE ${where} LIMIT ? OFFSET ?`, [...params, BATCH_SIZE, offset]);
+        throwIfAborted(signal);
+        if (!rows?.length) break;
+        const vectors: SearchVector[] = [];
+        for (let i = 0; i < rows.length; i++) {
+          if (i > 0 && i % 1024 === 0) await abortableDelay(0, signal);
+          throwIfAborted(signal);
+          const row = rows[i];
+          try {
+            if (useInt8 && row.vector_int8 && row.vector_norm && row.dimensions === queryVector.length) {
+              vectors.push({ index: offset + i, dimensions: row.dimensions,
+                int8: typeof row.vector_int8 === 'string' ? row.vector_int8 : bytes(row.vector_int8) });
             } else {
-              score = this.cosineSimilarityInt8WithNorm(
-                queryQuantized.int8Data,
-                queryQuantized.norm,
-                storedInt8,
-                row.vector_norm
-              );
-
-              // Debug: log first few vectors to diagnose issues
-              if (debugSampleCount < MAX_DEBUG_SAMPLES) {
-                const sampleQuery = queryQuantized.int8Data.slice(0, 5);
-                const sampleStored = storedInt8.slice(0, 5);
-                // Check if stored Int8 is all zeros (corrupted)
-                let nonZeroCount = 0;
-                for (let j = 0; j < Math.min(100, storedInt8.length); j++) {
-                  if (storedInt8[j] !== 0) nonZeroCount++;
-                }
-
-                // Also compute Float32 similarity for comparison (load from vectors_f32)
-                let float32Score = NaN;
-                let sampleFloat32: Float32Array = new Float32Array(0);
-                const debugF32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-                if (debugF32Row && debugF32Row.length > 0) {
-                  const storedFloat32 = this.bufferToFloat32Array(debugF32Row[0].vector, row.dimensions);
-                  float32Score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedFloat32);
-                  sampleFloat32 = storedFloat32.slice(0, 5);
-                }
-
-                ztoolkit.log(`[VectorStore] DEBUG sample ${debugSampleCount}:`);
-                ztoolkit.log(`  Int8 score=${score.toFixed(4)}, Float32 score=${isNaN(float32Score) ? 'N/A' : float32Score.toFixed(4)}, diff=${isNaN(float32Score) ? 'N/A' : Math.abs(score - float32Score).toFixed(4)}`);
-                ztoolkit.log(`  queryInt8[0:5]=[${Array.from(sampleQuery)}]`);
-                ztoolkit.log(`  storedInt8[0:5]=[${Array.from(sampleStored)}], nonZero=${nonZeroCount}/100`);
-                ztoolkit.log(`  storedFloat32[0:5]=[${Array.from(sampleFloat32).map(v => v.toFixed(4))}]`);
-                ztoolkit.log(`  base64Len=${typeof row.vector_int8 === 'string' ? row.vector_int8.length : 'N/A'}, int8ArrayLen=${storedInt8.length}`);
-                debugSampleCount++;
-              }
+              // Historical Float32 fallback stays available, including mixed indexes.
+              const f32 = await db.queryAsync('SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?', [row.item_key, row.chunk_id]);
+              throwIfAborted(signal);
+              if (f32?.length) vectors.push({ index: offset + i, dimensions: row.dimensions, f32: bytes(f32[0].vector) });
             }
-          } else {
-            // Fallback to Float32 from vectors_f32 table (dimension mismatch or no Int8 data)
-            if (queryDims !== storedDims) {
-              ztoolkit.log(`[VectorStore] Dimension mismatch: query=${queryDims}, stored=${storedDims}, falling back to Float32`);
-            }
-            const f32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-            if (f32Row && f32Row.length > 0) {
-              const storedVector = this.bufferToFloat32Array(f32Row[0].vector, row.dimensions);
-              score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedVector);
-            } else {
-              continue; // Skip — no float32 vector available
-            }
-          }
-
-          totalScanned++;
-
-          // Track score statistics for debugging
-          if (isNaN(score)) {
-            nanCount++;
-          } else {
-            scoreSum += score;
-            scoreCount++;
-            if (score > scoreMax) scoreMax = score;
-            if (score < scoreMin) scoreMin = score;
-          }
-
-          if (score >= minScore) {
-            const result: SearchResult = {
-              itemKey: row.item_key,
-              chunkId: row.chunk_id,
-              score,
-              chunkText: row.chunk_text,
-              language: row.language
-            };
-
-            // Maintain top K using simple array (efficient for small K)
-            if (minHeap.length < topK) {
-              minHeap.push(result);
-              if (minHeap.length === topK) {
-                minHeap.sort((a, b) => a.score - b.score);
-              }
-            } else if (score > minHeap[0].score) {
-              minHeap[0] = result;
-              // Re-sort to maintain min-heap property
-              minHeap.sort((a, b) => a.score - b.score);
-            }
-          }
-        } catch (e) {
-          // Skip invalid vectors
+          } catch (error) { throwIfAborted(signal); /* Skip malformed vector rows as before. */ }
         }
+        const candidates = await lease.score(vectors, queryVector, topK, minScore);
+        throwIfAborted(signal);
+        for (const candidate of candidates) {
+          const row = rows[candidate.index - offset];
+          best.push({ index: candidate.index, itemKey: row.item_key, chunkId: row.chunk_id,
+            score: candidate.score, chunkText: row.chunk_text, language: row.language });
+        }
+        best.sort((a, b) => b.score - a.score || a.index - b.index);
+        best.splice(topK);
+        offset += rows.length;
+        ztoolkit.log(`[VectorStore] search batch: ${rows.length} vectors in ${Date.now() - batchStarted}ms, ${offset}/${total}`);
       }
-
-      const computeTime = Date.now() - computeStartTime;
-      offset += rows.length;
-
-      ztoolkit.log(`[VectorStore] search() batch ${batchCount}: ${rows.length} vectors, IO=${ioTime}ms, compute=${computeTime}ms, progress=${offset}/${totalCount}`);
-    }
-
-    // Final sort (descending by score)
-    const topResults = minHeap.sort((a, b) => b.score - a.score);
-
-    const searchTime = Date.now() - startTime;
-    const topScores = topResults.slice(0, 5).map(r => r.score.toFixed(3)).join(', ');
-    ztoolkit.log(`[VectorStore] search() completed in ${searchTime}ms: ${totalScanned} vectors in ${batchCount} batches, returning ${topResults.length}`);
-
-    // Log score statistics for debugging
-    if (scoreCount > 0) {
-      const avgScore = scoreSum / scoreCount;
-      ztoolkit.log(`[VectorStore] search() score stats: min=${scoreMin.toFixed(4)}, max=${scoreMax.toFixed(4)}, avg=${avgScore.toFixed(4)}, NaN=${nanCount}`);
-    } else if (nanCount > 0) {
-      ztoolkit.log(`[VectorStore] search() WARNING: All ${nanCount} scores were NaN! Check dimension mismatch or data corruption.`);
-    }
-
-    if (topResults.length > 0) {
-      ztoolkit.log(`[VectorStore] search() top scores: [${topScores}]`);
-    }
-
-    return topResults;
+      ztoolkit.log(`[VectorStore] Worker search completed in ${Date.now() - started}ms, ${best.length} results`);
+      return best.map(({ index: _index, ...result }) => result);
+    });
   }
 
   /**
@@ -1321,29 +1161,37 @@ export class VectorStore {
   /**
    * Get statistics
    */
-  async getStats(): Promise<VectorStoreStats> {
+  async getStats(signal?: AbortSignal): Promise<VectorStoreStats> {
+    throwIfAborted(signal);
     await this.ensureInitialized();
+    throwIfAborted(signal);
 
     ztoolkit.log(`[VectorStore] getStats() called: instanceId=${this.instanceId}, dbPath=${this.dbPath}`);
 
-    const total = await this.db.valueQueryAsync(
+    const valueQuery = async (sql: string): Promise<any> => {
+      throwIfAborted(signal);
+      const value = await this.db.valueQueryAsync(sql);
+      throwIfAborted(signal);
+      return value;
+    };
+    const total = await valueQuery(
       `SELECT COUNT(*) FROM embeddings`
     );
-    const items = await this.db.valueQueryAsync(
+    const items = await valueQuery(
       `SELECT COUNT(DISTINCT item_key) FROM embeddings`
     );
-    const zh = await this.db.valueQueryAsync(
+    const zh = await valueQuery(
       `SELECT COUNT(*) FROM embeddings WHERE language = 'zh'`
     );
-    const en = await this.db.valueQueryAsync(
+    const en = await valueQuery(
       `SELECT COUNT(*) FROM embeddings WHERE language = 'en'`
     );
 
     // Content cache stats
-    const cachedItems = await this.db.valueQueryAsync(
+    const cachedItems = await valueQuery(
       `SELECT COUNT(*) FROM content_cache`
     );
-    const cachedSize = await this.db.valueQueryAsync(
+    const cachedSize = await valueQuery(
       `SELECT COALESCE(SUM(LENGTH(full_content)), 0) FROM content_cache`
     );
 
@@ -1351,7 +1199,7 @@ export class VectorStore {
     const storedDimensions = dimensionCounts.length === 1 ? dimensionCounts[0].dimensions : undefined;
 
     // Int8 migration status
-    const int8Count = await this.db.valueQueryAsync(
+    const int8Count = await valueQuery(
       `SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL`
     );
     const int8MigrationStatus = total > 0 ? {
@@ -1361,10 +1209,10 @@ export class VectorStore {
     } : undefined;
 
     // Float32 table migration status
-    const f32Count = await this.db.valueQueryAsync(
+    const f32Count = await valueQuery(
       `SELECT COUNT(*) FROM vectors_f32`
     );
-    const f32Unmigrated = await this.db.valueQueryAsync(
+    const f32Unmigrated = await valueQuery(
       `SELECT COUNT(*) FROM embeddings WHERE LENGTH(vector) > 0`
     );
     if (f32Unmigrated > 0) {
@@ -1384,7 +1232,7 @@ export class VectorStore {
     }
 
     // index_status table count (may differ from embeddings DISTINCT count)
-    const indexStatusCount = await this.db.valueQueryAsync(
+    const indexStatusCount = await valueQuery(
       `SELECT COUNT(*) FROM index_status`
     );
     if (indexStatusCount !== items) {
@@ -1410,16 +1258,19 @@ export class VectorStore {
    * Get vectors for a specific item (for find_similar).
    * Reads float32 vectors from vectors_f32 table.
    */
-  async getItemVectors(itemKey: string): Promise<Array<{
+  async getItemVectors(itemKey: string, signal?: AbortSignal): Promise<Array<{
     chunkId: number;
     vector: Float32Array;
     language: string;
   }>> {
+    throwIfAborted(signal);
     await this.ensureInitialized();
+    throwIfAborted(signal);
 
     // Get dimensions and language from embeddings table
     const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [itemKey]);
 
+    throwIfAborted(signal);
     if (!metaRows || metaRows.length === 0) {
       return [];
     }
@@ -1427,6 +1278,7 @@ export class VectorStore {
     // Get float32 vectors from vectors_f32 table
     const vecRows = await this.db.queryAsync(`SELECT chunk_id, vector FROM vectors_f32 WHERE item_key = ? ORDER BY chunk_id`, [itemKey]);
 
+    throwIfAborted(signal);
     // Build a map of chunk_id -> vector blob for fast lookup
     const vecMap = new Map<number, any>();
     if (vecRows && vecRows.length > 0) {
@@ -2053,6 +1905,8 @@ export class VectorStore {
    * to ensure shutdown doesn't hang on pending async operations.
    */
   close(): void {
+    this.searchPool?.dispose();
+    this.searchPool = null;
     const db = this.db;
 
     // Release references synchronously to prevent memory leaks

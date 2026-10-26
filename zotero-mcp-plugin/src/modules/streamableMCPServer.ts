@@ -21,6 +21,7 @@ import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import { MCPSettingsService } from './mcpSettingsService';
 import { getSemanticSearchService, SemanticSearchService } from './semantic';
+import { RequestTaskManager, TaskError, throwIfAborted } from './requestLifecycle';
 import {
   commitNotifierQueue,
   createNotifierQueue,
@@ -65,6 +66,7 @@ export interface MCPNotification {
  * Architecture: AI Client (streamable HTTP) ↔ Zotero Plugin (integrated MCP server)
  */
 export class StreamableMCPServer {
+  private readonly tasks = new RequestTaskManager();
   private isInitialized: boolean = false;
   private serverInfo = {
     name: 'zotero-integrated-mcp',
@@ -76,10 +78,14 @@ export class StreamableMCPServer {
     // No initialization needed - using direct function calls
   }
 
+  shutdown(): void {
+    this.tasks.cancelAll();
+  }
+
   /**
    * Handle incoming MCP requests and return HTTP response
    */
-  async handleMCPRequest(requestBody: string): Promise<{ status: number; statusText: string; headers: any; body: string }> {
+  async handleMCPRequest(requestBody: string, sessionId = "local"): Promise<{ status: number; statusText: string; headers: any; body: string }> {
     let parsedRequest: unknown;
 
     try {
@@ -138,7 +144,7 @@ export class StreamableMCPServer {
 
       ztoolkit.log(`[StreamableMCP] Received: ${request.method}`);
 
-      const response = await this.processRequest(request);
+      const response = await this.processRequest(request, sessionId);
 
       if (response === null) {
         return {
@@ -181,11 +187,16 @@ export class StreamableMCPServer {
   /**
    * Process individual MCP requests
    */
-  private async processRequest(request: MCPRequest): Promise<MCPResponse | null> {
+  private async processRequest(request: MCPRequest, sessionId: string): Promise<MCPResponse | null> {
     const isNotification = this.isNotificationRequest(request);
 
     if (isNotification) {
       switch (request.method) {
+        case 'notifications/cancelled':
+          if (typeof request.params?.requestId === 'string' || typeof request.params?.requestId === 'number') {
+            this.tasks.cancel(sessionId, request.params.requestId, typeof request.params.reason === 'string' ? request.params.reason : undefined);
+          }
+          return null;
         case 'initialized':
         case 'notifications/initialized':
           this.isInitialized = true;
@@ -215,7 +226,8 @@ export class StreamableMCPServer {
           return this.handleToolsList(request);
 
         case 'tools/call':
-          return await this.handleToolCall(request);
+          return await this.tasks.run(sessionId, request.id ?? null,
+            (signal) => this.handleToolCall(request, signal));
 
         case 'resources/list':
           return this.handleResourcesList(request);
@@ -231,6 +243,8 @@ export class StreamableMCPServer {
       }
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Error processing ${request.method}: ${error}`);
+      if (error instanceof TaskError && error.code === -32800) return null;
+      if (error instanceof TaskError) return this.createError(request.id ?? null, error.code, error.message);
       return this.createError(request.id ?? null, -32603, 'Internal error');
     }
   }
@@ -1175,7 +1189,9 @@ export class StreamableMCPServer {
     return this.createResponse(request.id ?? null, { tools: finalTools });
   }
 
-  private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
+  private async handleToolCall(request: MCPRequest, signal?: AbortSignal): Promise<MCPResponse> {
+    throwIfAborted(signal);
+    const runWrite = <T>(operation: () => Promise<T>) => runSerializedWrite(operation, signal);
     const { name, arguments: args } = request.params;
     
     try {
@@ -1194,7 +1210,7 @@ export class StreamableMCPServer {
           break;
 
         case 'search_library':
-          result = await this.callSearchLibrary(args);
+          result = await this.callSearchLibrary(args, signal);
           break;
 
         case 'search_annotations':
@@ -1223,7 +1239,7 @@ export class StreamableMCPServer {
           if (!args?.itemKey && !args?.attachmentKey) {
             throw new Error('Either itemKey or attachmentKey is required');
           }
-          result = await this.callGetContent(args);
+          result = await this.callGetContent(args, signal);
           break;
 
         case 'get_collections':
@@ -1263,7 +1279,7 @@ export class StreamableMCPServer {
           if (!args?.name) {
             throw new Error('name is required');
           }
-          result = await runSerializedWrite(() => this.callCreateCollection(args));
+          result = await runWrite(() => this.callCreateCollection(args));
           break;
         }
 
@@ -1275,7 +1291,7 @@ export class StreamableMCPServer {
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
           }
-          result = await runSerializedWrite(() => this.callUpdateCollection(args));
+          result = await runWrite(() => this.callUpdateCollection(args));
           break;
         }
 
@@ -1291,7 +1307,7 @@ export class StreamableMCPServer {
           if (!itemKeys || itemKeys.length === 0) {
             throw new Error(`itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`);
           }
-          result = await runSerializedWrite(() =>
+          result = await runWrite(() =>
             this.callTrashItems({ ...args, itemKeys }),
           );
           break;
@@ -1305,7 +1321,7 @@ export class StreamableMCPServer {
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
           }
-          result = await runSerializedWrite(() => this.callDeleteCollection(args));
+          result = await runWrite(() => this.callDeleteCollection(args));
           break;
         }
 
@@ -1321,7 +1337,7 @@ export class StreamableMCPServer {
           if (!addKeys || addKeys.length === 0) {
             throw new Error(`itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`);
           }
-          result = await runSerializedWrite(() => this.callAddItemsToCollection({ ...args, itemKeys: addKeys }));
+          result = await runWrite(() => this.callAddItemsToCollection({ ...args, itemKeys: addKeys }));
           break;
         }
 
@@ -1337,7 +1353,7 @@ export class StreamableMCPServer {
           if (!removeKeys || removeKeys.length === 0) {
             throw new Error(`itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`);
           }
-          result = await runSerializedWrite(() => this.callRemoveItemsFromCollection({ ...args, itemKeys: removeKeys }));
+          result = await runWrite(() => this.callRemoveItemsFromCollection({ ...args, itemKeys: removeKeys }));
           break;
         }
 
@@ -1365,12 +1381,12 @@ export class StreamableMCPServer {
           }
           if (name === 'semantic_search') {
             if (!args?.query) throw new Error('query is required');
-            result = await this.callSemanticSearch(args);
+            result = await this.callSemanticSearch(args, signal);
           } else if (name === 'find_similar') {
             if (!args?.itemKey) throw new Error('itemKey is required');
-            result = await this.callFindSimilar(args);
+            result = await this.callFindSimilar(args, signal);
           } else {
-            result = await this.callSemanticStatus();
+            result = await this.callSemanticStatus(signal);
           }
           break;
         }
@@ -1379,7 +1395,7 @@ export class StreamableMCPServer {
           if (!args?.action) {
             throw new Error('action is required');
           }
-          result = await this.callFulltextDatabase(args);
+          result = await this.callFulltextDatabase(args, signal);
           break;
 
         // Write Tools
@@ -1391,7 +1407,7 @@ export class StreamableMCPServer {
           if (!args?.action || !args?.content) {
             throw new Error('action and content are required');
           }
-          result = await runSerializedWrite(() => this.callWriteNote(args));
+          result = await runWrite(() => this.callWriteNote(args));
           break;
         }
 
@@ -1403,7 +1419,7 @@ export class StreamableMCPServer {
           if (!args?.action || !args?.itemKey || !args?.tags) {
             throw new Error('action, itemKey, and tags are required');
           }
-          result = await runSerializedWrite(() => this.callWriteTag(args));
+          result = await runWrite(() => this.callWriteTag(args));
           break;
         }
 
@@ -1418,7 +1434,7 @@ export class StreamableMCPServer {
           if (!args?.fields && !args?.creators) {
             throw new Error('At least one of fields or creators is required');
           }
-          result = await runSerializedWrite(() => this.callWriteMetadata(args));
+          result = await runWrite(() => this.callWriteMetadata(args));
           break;
         }
 
@@ -1430,7 +1446,7 @@ export class StreamableMCPServer {
           if (!args?.action) {
             throw new Error('action is required');
           }
-          result = await runSerializedWrite(() => this.callWriteItem(args));
+          result = await runWrite(() => this.callWriteItem(args));
           break;
         }
 
@@ -1455,6 +1471,7 @@ export class StreamableMCPServer {
           throw new Error(`Unknown tool: ${name}`);
       }
 
+      throwIfAborted(signal);
       // Wrap result in MCP content format with proper text type.
       // Keep large results compact: the HTTP layer writes the body in a
       // single synchronous call, so avoid inflating multi-MB payloads.
@@ -1470,6 +1487,7 @@ export class StreamableMCPServer {
 
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
+      if (error instanceof TaskError) return this.createError(request.id ?? null, error.code, error.message);
       return this.createError(request.id ?? null, -32603, 
         `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1500,7 +1518,7 @@ export class StreamableMCPServer {
     return result;
   }
 
-  private async callSearchLibrary(args: any): Promise<any> {
+  private async callSearchLibrary(args: any, signal?: AbortSignal): Promise<any> {
     // Apply mode-based defaults before creating search params
     const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
     const modeConfig = this.getSearchModeConfiguration(effectiveMode);
@@ -1520,12 +1538,8 @@ export class StreamableMCPServer {
       }
     }
     
-    const SEARCH_TIMEOUT_MS = 25000; // 25 秒超时，低于 keepAlive 的 30 秒
-    const searchPromise = handleSearch(searchParams);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Search timed out after 25 seconds. Try narrowing your query or reducing the limit.")), SEARCH_TIMEOUT_MS);
-    });
-    const response = await Promise.race([searchPromise, timeoutPromise]);
+    const response = await handleSearch(searchParams, signal);
+    throwIfAborted(signal);
     let result = response.body ? JSON.parse(response.body) : response;
     
     // Add mode information to metadata
@@ -1612,7 +1626,7 @@ export class StreamableMCPServer {
     return result;
   }
 
-  private async callGetContent(args: any): Promise<any> {
+  private async callGetContent(args: any, signal?: AbortSignal): Promise<any> {
     const { itemKey, attachmentKey, include, format, mode, contentControl, libraryID } = args;
     const extractor = new UnifiedContentExtractor();
     
@@ -1621,10 +1635,10 @@ export class StreamableMCPServer {
       
       if (itemKey) {
         // Get content from item with unified mode control and content control parameters
-        result = await extractor.getItemContent(itemKey, include || {}, mode, contentControl, libraryID);
+        result = await extractor.getItemContent(itemKey, include || {}, mode, contentControl, libraryID, signal);
       } else if (attachmentKey) {
         // Get content from specific attachment with unified mode control and content control parameters
-        result = await extractor.getAttachmentContent(attachmentKey, mode, contentControl, libraryID);
+        result = await extractor.getAttachmentContent(attachmentKey, mode, contentControl, libraryID, signal);
       } else {
         throw new Error('Either itemKey or attachmentKey must be provided');
       }
@@ -1850,7 +1864,7 @@ export class StreamableMCPServer {
 
   // ============ Semantic Search Methods ============
 
-  private async callSemanticSearch(args: any): Promise<any> {
+  private async callSemanticSearch(args: any, signal?: AbortSignal): Promise<any> {
     try {
       const semanticService = getSemanticSearchService();
       await semanticService.initialize();
@@ -1858,7 +1872,8 @@ export class StreamableMCPServer {
       const results = await semanticService.search(args.query, {
         topK: args.topK,
         minScore: args.minScore,
-        language: args.language
+        language: args.language,
+        signal,
       });
 
       const response = {
@@ -1870,7 +1885,7 @@ export class StreamableMCPServer {
           searchMode: 'semantic',
           resultCount: results.length,
           fallbackMode: semanticService.getIndexProgress().status === 'idle'
-            ? (await semanticService.getStats()).serviceStatus.fallbackMode
+            ? (await semanticService.getStats(signal)).serviceStatus.fallbackMode
             : false
         }
       };
@@ -1882,14 +1897,15 @@ export class StreamableMCPServer {
     }
   }
 
-  private async callFindSimilar(args: any): Promise<any> {
+  private async callFindSimilar(args: any, signal?: AbortSignal): Promise<any> {
     try {
       const semanticService = getSemanticSearchService();
       await semanticService.initialize();
 
       const results = await semanticService.findSimilar(args.itemKey, {
         topK: args.topK,
-        minScore: args.minScore
+        minScore: args.minScore,
+        signal,
       });
 
       const response = {
@@ -1909,11 +1925,11 @@ export class StreamableMCPServer {
     }
   }
 
-  private async callSemanticStatus(): Promise<any> {
+  private async callSemanticStatus(signal?: AbortSignal): Promise<any> {
     try {
       const semanticService = getSemanticSearchService();
       const isReady = await semanticService.isReady();
-      const stats = isReady ? await semanticService.getStats() : null;
+      const stats = isReady ? await semanticService.getStats(signal) : null;
       const progress = semanticService.getIndexProgress();
 
       // Check Int8 migration status
@@ -1921,7 +1937,9 @@ export class StreamableMCPServer {
       try {
         const { getVectorStore } = await import('./semantic/vectorStore');
         const vectorStore = getVectorStore();
+        throwIfAborted(signal);
         await vectorStore.initialize();
+        throwIfAborted(signal);
         int8Status = await vectorStore.needsInt8Migration();
       } catch (e) {
         // Ignore if vector store not available
@@ -1957,13 +1975,14 @@ export class StreamableMCPServer {
     }
   }
 
-  private async callFulltextDatabase(args: any): Promise<any> {
+  private async callFulltextDatabase(args: any, signal?: AbortSignal): Promise<any> {
     try {
       const { getVectorStore } = await import('./semantic/vectorStore');
       const vectorStore = getVectorStore();
       await vectorStore.initialize();
 
       const { action, query, itemKeys, limit = 20, caseSensitive = false } = args;
+      throwIfAborted(signal);
 
       switch (action) {
         case 'list': {
@@ -3295,6 +3314,7 @@ export class StreamableMCPServer {
    */
   getStatus() {
     return {
+      tasks: this.tasks.getStatus(),
       isInitialized: this.isInitialized,
       serverInfo: this.serverInfo,
       protocolVersion: '2024-11-05',
@@ -3302,6 +3322,7 @@ export class StreamableMCPServer {
         'initialize',
         'initialized', 
         'notifications/initialized',
+        'notifications/cancelled',
         'tools/list',
         'tools/call',
         'resources/list',

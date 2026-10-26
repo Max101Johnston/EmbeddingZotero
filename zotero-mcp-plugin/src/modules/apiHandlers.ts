@@ -1,3 +1,4 @@
+import { throwIfAborted } from "./requestLifecycle";
 /**
  * API Endpoint Handlers for Zotero MCP Plugin
  */
@@ -239,9 +240,11 @@ export async function handleGetItem(
  */
 export async function handleSearch(
   query: URLSearchParams,
+  signal?: AbortSignal,
 ): Promise<HttpResponse> {
   ztoolkit.log("[MCP ApiHandlers] handleSearch called");
 
+  throwIfAborted(signal);
   try {
     // Convert URLSearchParams to a plain object for handleSearchRequest
     // Convert URLSearchParams to a plain object, handling tags specifically
@@ -278,7 +281,7 @@ export async function handleSearch(
       `[MCP ApiHandlers] Converted search params: ${JSON.stringify(searchParams)}`,
     );
 
-    const searchResult = await handleSearchRequest(searchParams);
+    const searchResult = await handleSearchRequest(searchParams, signal);
 
     ztoolkit.log(
       `[MCP ApiHandlers] Search engine returned ${searchResult.results?.length || 0} results`,
@@ -298,6 +301,7 @@ export async function handleSearch(
 
     return response;
   } catch (e) {
+    throwIfAborted(signal);
     const error = e instanceof Error ? e : new Error(String(e));
     ztoolkit.log(
       `[MCP ApiHandlers] Error in handleSearch: ${error.message}`,

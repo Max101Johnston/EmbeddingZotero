@@ -1,3 +1,4 @@
+import { throwIfAborted } from "./requestLifecycle";
 /**
  * Unified Content Extractor for Zotero MCP Plugin
  * 
@@ -62,9 +63,12 @@ export class UnifiedContentExtractor {
     mode?: string,
     contentControl?: ContentControl,
     libraryID: number = Zotero.Libraries.userLibraryID,
+    signal?: AbortSignal,
   ): Promise<ContentResult> {
     try {
+      throwIfAborted(signal);
       const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+      throwIfAborted(signal);
       if (!item) {
         throw new Error(`Item with key ${itemKey} not found`);
       }
@@ -101,7 +105,7 @@ export class UnifiedContentExtractor {
 
       // Attachment key passed as itemKey: delegate to the single-attachment path
       if (item.isAttachment()) {
-        const attachmentContent = await this.processAttachment(item, modeConfig, effectiveMode, contentControl);
+        const attachmentContent = await this.processAttachment(item, modeConfig, effectiveMode, contentControl, signal);
         return {
           itemKey,
           attachmentKey: item.key,
@@ -160,7 +164,7 @@ export class UnifiedContentExtractor {
 
       // Extract attachments (PDF and others) with intelligent processing
       if (options.pdf || options.attachments) {
-        const attachments = await this.extractAttachments(item, options, modeConfig, effectiveMode, contentControl);
+        const attachments = await this.extractAttachments(item, options, modeConfig, effectiveMode, contentControl, signal);
         if (attachments.length > 0) {
           result.content.attachments = attachments;
           result.metadata.sources.push('attachments');
@@ -168,6 +172,7 @@ export class UnifiedContentExtractor {
         }
       }
 
+      throwIfAborted(signal);
       // Extract notes with intelligent processing
       if (options.notes) {
         const notes = await this.extractNotes(item, modeConfig, effectiveMode, contentControl);
@@ -178,6 +183,7 @@ export class UnifiedContentExtractor {
         }
       }
 
+      throwIfAborted(signal);
       // Extract webpage snapshots (skip snapshots already returned as attachments)
       if (options.webpage) {
         const processedKeys = new Set<string>((result.content.attachments || []).map((a: any) => a.attachmentKey));
@@ -206,9 +212,12 @@ export class UnifiedContentExtractor {
     mode?: string,
     contentControl?: ContentControl,
     libraryID: number = Zotero.Libraries.userLibraryID,
+    signal?: AbortSignal,
   ): Promise<any> {
     try {
+      throwIfAborted(signal);
       const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, attachmentKey);
+      throwIfAborted(signal);
       if (!attachment?.isAttachment()) {
         throw new Error(`Attachment with key ${attachmentKey} not found`);
       }
@@ -221,7 +230,7 @@ export class UnifiedContentExtractor {
       const effectiveMode = mode || MCPSettingsService.get('content.mode');
       const modeConfig = this.getModeConfiguration(effectiveMode);
 
-      return await this.processAttachment(attachment, modeConfig, effectiveMode, contentControl);
+      return await this.processAttachment(attachment, modeConfig, effectiveMode, contentControl, signal);
 
     } catch (error) {
       ztoolkit.log(`[UnifiedContentExtractor] Error in getAttachmentContent: ${error}`, "error");
@@ -244,7 +253,8 @@ export class UnifiedContentExtractor {
   /**
    * Extract content from all attachments with intelligent processing
    */
-  private async extractAttachments(item: any, options: ContentIncludeOptions, modeConfig: any, mode: string, contentControl?: ContentControl): Promise<any[]> {
+  private async extractAttachments(item: any, options: ContentIncludeOptions, modeConfig: any, mode: string, contentControl?: ContentControl, signal?: AbortSignal): Promise<any[]> {
+    throwIfAborted(signal);
     const attachments = [];
     const attachmentIDs = item.getAttachments();
 
@@ -254,6 +264,7 @@ export class UnifiedContentExtractor {
       : attachmentIDs;
 
     for (const attachmentID of limitedAttachmentIDs) {
+      throwIfAborted(signal);
       try {
         const attachment = Zotero.Items.get(attachmentID);
         const contentType = attachment.attachmentContentType;
@@ -263,11 +274,12 @@ export class UnifiedContentExtractor {
         if (isPDF && !options.pdf) continue;
         if (!isPDF && !options.attachments) continue;
 
-        const attachmentContent = await this.processAttachment(attachment, modeConfig, mode, contentControl);
+        const attachmentContent = await this.processAttachment(attachment, modeConfig, mode, contentControl, signal);
         if (attachmentContent && attachmentContent.content) {
           attachments.push(attachmentContent);
         }
       } catch (error) {
+        throwIfAborted(signal);
         ztoolkit.log(`[UnifiedContentExtractor] Error extracting attachment ${attachmentID}: ${error}`, "warn");
       }
     }
@@ -422,7 +434,8 @@ export class UnifiedContentExtractor {
   /**
    * Process a single attachment with intelligent processing (unified logic)
    */
-  private async processAttachment(attachment: any, modeConfig: any, mode: string, contentControl?: ContentControl): Promise<any> {
+  private async processAttachment(attachment: any, modeConfig: any, mode: string, contentControl?: ContentControl, signal?: AbortSignal): Promise<any> {
+    throwIfAborted(signal);
     const filePath = attachment.getFilePath();
     const contentType = attachment.attachmentContentType;
     const filename = attachment.attachmentFilename;
@@ -440,7 +453,7 @@ export class UnifiedContentExtractor {
     try {
       // Unified extraction logic based on file type
       if (this.isPDF(attachment, contentType)) {
-        content = await this.extractPDFText(filePath, attachment.id);
+        content = await this.extractPDFText(filePath, attachment.id, signal);
         extractionMethod = 'pdf_cached_or_extracted';
       } else if (this.isHTML(contentType)) {
         content = await this.extractHTMLText(filePath);
@@ -454,6 +467,7 @@ export class UnifiedContentExtractor {
         return null;
       }
 
+      throwIfAborted(signal);
       // Apply intelligent processing if content is substantial
       let processedResult: ProcessingResult | null = null;
       let finalContent = content.trim();
@@ -464,6 +478,7 @@ export class UnifiedContentExtractor {
           processedResult = await this.intelligentProcessor.processContent(finalContent, mode, contentControl);
           finalContent = processedResult.processedText;
         } catch (error) {
+        throwIfAborted(signal);
           ztoolkit.log(`[UnifiedContentExtractor] Intelligent processing failed for attachment, falling back: ${error}`, "warn");
           // Fallback to simple truncation
           if (modeConfig.maxContentLength > 0 && finalContent.length > modeConfig.maxContentLength) {
@@ -504,6 +519,7 @@ export class UnifiedContentExtractor {
       return result;
 
     } catch (error) {
+        throwIfAborted(signal);
       const errorMsg = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[UnifiedContentExtractor] Error processing attachment ${attachment.key}: ${errorMsg}`, "error");
 
@@ -547,10 +563,12 @@ export class UnifiedContentExtractor {
   /**
    * Extract text from PDF - first try Zotero cache, then fallback to PDFProcessor
    */
-  private async extractPDFText(filePath: string, attachmentId?: number): Promise<string> {
+  private async extractPDFText(filePath: string, attachmentId?: number, signal?: AbortSignal): Promise<string> {
+    throwIfAborted(signal);
     // First try Zotero's cached fulltext (much faster)
     if (attachmentId) {
       const cachedText = await this.getZoteroCachedFulltext(attachmentId);
+      throwIfAborted(signal);
       if (cachedText) {
         return TextFormatter.formatPDFText(cachedText);
       }
@@ -560,9 +578,10 @@ export class UnifiedContentExtractor {
     const processor = new PDFProcessor(ztoolkit);
     try {
       ztoolkit.log(`[UnifiedContentExtractor] Fallback to PDFProcessor for: ${filePath}`);
-      const rawText = await processor.extractText(filePath);
+      const rawText = await processor.extractText(filePath, signal);
       return TextFormatter.formatPDFText(rawText);
     } catch (error) {
+      throwIfAborted(signal);
       const errorMsg = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[UnifiedContentExtractor] PDF extraction failed: ${errorMsg}`, "warn");
       if (errorMsg.includes('timed out')) {

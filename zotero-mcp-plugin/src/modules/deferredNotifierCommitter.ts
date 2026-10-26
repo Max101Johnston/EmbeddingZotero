@@ -1,3 +1,4 @@
+import { SerialTaskQueue } from "./requestLifecycle";
 export interface DeferredNotifierCommitResult {
   completed: boolean;
   elapsedMs: number;
@@ -99,44 +100,15 @@ const notifierCommitter = new DeferredNotifierCommitter(
   (message, level) => ztoolkit.log(message, level),
 );
 
-let writeTail: Promise<void> = Promise.resolve();
-let pendingWrites = 0;
+const writeQueue = new SerialTaskQueue(32);
 
-export async function runSerializedWrite<T>(
-  operation: () => Promise<T>,
-): Promise<T> {
-  pendingWrites++;
-  let release!: () => void;
-  const previous = writeTail;
-  writeTail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    pendingWrites--;
-    release();
-  }
+export async function runSerializedWrite<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return writeQueue.run(operation, signal);
 }
 
 export async function flushWriteOperations(maxWaitMs = 5000): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const completed = await Promise.race([
-    writeTail.then(() => true),
-    new Promise<false>((resolve) => {
-      timer = setTimeout(() => resolve(false), maxWaitMs);
-    }),
-  ]);
-
-  if (timer) clearTimeout(timer);
-  if (!completed) {
-    ztoolkit.log(
-      `[StreamableMCP] Shutdown timed out with ${pendingWrites} write operation(s) still pending`,
-      "warn",
-    );
-  }
+  const completed = await writeQueue.waitForIdle(maxWaitMs);
+  if (!completed) ztoolkit.log(`[StreamableMCP] Shutdown timed out with ${writeQueue.size} write operation(s) still pending`, "warn");
   return completed;
 }
 

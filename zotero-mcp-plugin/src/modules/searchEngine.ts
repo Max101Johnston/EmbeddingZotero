@@ -1,3 +1,4 @@
+import { throwIfAborted } from "./requestLifecycle";
 import { formatItem, formatItemBrief } from "./itemFormatter";
 
 declare let ztoolkit: ZToolkit;
@@ -115,10 +116,12 @@ async function sortItemsWithYield(
   items: Zotero.Item[],
   sort: string,
   direction: string,
+  signal?: AbortSignal,
 ): Promise<Zotero.Item[]> {
   // 预计算排序键
   const sortKeyMap = new Map<number, string>();
   for (let i = 0; i < items.length; i++) {
+    throwIfAborted(signal);
     const item = items[i];
     let key: string;
     if (sort === "creator") {
@@ -341,11 +344,13 @@ async function performFulltextSearch(
   query: string,
   libraryID: number,
   mode: "attachment" | "note" | "both" = "both",
-  operator: "contains" | "exact" | "regex" = "contains"
+  operator: "contains" | "exact" | "regex" = "contains",
+  signal?: AbortSignal,
 ): Promise<{ itemIDs: number[], matchDetails: Map<number, any> }> {
   const matchDetails = new Map<number, any>();
   const itemIDSet = new Set<number>();
 
+  throwIfAborted(signal);
   try {
     if (mode === "attachment" || mode === "both") {
       // 使用Zotero.Search搜索附件全文
@@ -358,8 +363,10 @@ async function performFulltextSearch(
       attachmentSearch.addCondition("itemType", "is", "attachment");
 
       const attachmentIDs = await attachmentSearch.search();
+      throwIfAborted(signal);
 
       for (let i = 0; i < attachmentIDs.length; i++) {
+        throwIfAborted(signal);
         const attachmentID = attachmentIDs[i];
         const attachment = Zotero.Items.get(attachmentID);
         if (attachment && attachment.isAttachment()) {
@@ -394,6 +401,7 @@ async function performFulltextSearch(
               snippet = '...' + sqlResult + '...';
             }
           } catch (_dbErr) {
+      throwIfAborted(signal);
             // Fallback: 加载文本但限制前 50KB
             try {
               const content = await attachment.attachmentText || '';
@@ -407,6 +415,7 @@ async function performFulltextSearch(
                 }
               }
             } catch (_e) {
+      throwIfAborted(signal);
               snippet = '';
             }
           }
@@ -440,6 +449,7 @@ async function performFulltextSearch(
       const noteIDs = await s.search();
 
       for (const noteID of noteIDs) {
+        throwIfAborted(signal);
         const note = Zotero.Items.get(noteID);
         if (note && note.isNote()) {
           const parentItem = note.parentItem;
@@ -483,6 +493,7 @@ async function performFulltextSearch(
 
     return { itemIDs: Array.from(itemIDSet), matchDetails };
   } catch (error) {
+      throwIfAborted(signal);
     ztoolkit.log(`[SearchEngine] Fulltext search error: ${error}`, "error");
     return { itemIDs: [], matchDetails };
   }
@@ -610,7 +621,9 @@ function applyAdvancedFilters(
  */
 export async function handleSearchRequest(
   params: SearchParams,
+  signal?: AbortSignal,
 ): Promise<Record<string, any>> {
+  throwIfAborted(signal);
   Zotero.debug(
     `[MCP Search] Received search params: ${JSON.stringify(params)}`,
   );
@@ -657,7 +670,7 @@ export async function handleSearchRequest(
   if (params.fulltext) {
     const mode = params.fulltextMode || "both";
     const operator = params.fulltextOperator || "contains";
-    const fulltextResult = await performFulltextSearch(params.fulltext, libraryID, mode, operator);
+    const fulltextResult = await performFulltextSearch(params.fulltext, libraryID, mode, operator, signal);
     fulltextItemIDs = fulltextResult.itemIDs;
     fulltextMatchDetails = fulltextResult.matchDetails;
 
@@ -794,6 +807,7 @@ export async function handleSearchRequest(
   } else {
     // 否则执行常规搜索
     initialItemIDs = await s.search();
+    throwIfAborted(signal);
   }
   
   if (initialItemIDs.length === 0) {
@@ -841,6 +855,7 @@ export async function handleSearchRequest(
       const paginatedIDs = initialItemIDs.slice(offset, offset + limit);
       items = await Zotero.Items.getAsync(paginatedIDs);
       await Zotero.Items.loadDataTypes(items);
+      throwIfAborted(signal);
     } else {
       // 其他排序字段需要加载 items，但限制上限
       const cappedIDs = initialItemIDs.slice(0, Math.min(initialItemIDs.length, 2000));
@@ -848,13 +863,15 @@ export async function handleSearchRequest(
       // #105: 未在本会话中打开过的文库（feed/群组）需要显式加载条目数据，
       // 否则 getField() 会抛 UnloadedDataException
       await Zotero.Items.loadDataTypes(items);
+      throwIfAborted(signal);
       // 使用预计算排序键（Schwartzian transform）
-      items = await sortItemsWithYield(items, sort, direction);
+      items = await sortItemsWithYield(items, sort, direction, signal);
     }
   } else {
     // --- 慢路径：需要内存过滤，加载全部 ---
     items = await Zotero.Items.getAsync(initialItemIDs);
     await Zotero.Items.loadDataTypes(items);
+      throwIfAborted(signal);
 
     // 标签过滤（改为 for 循环 + yield）
     if (queryTags.length > 0) {
@@ -863,6 +880,7 @@ export async function handleSearchRequest(
 
       const filteredItems: Zotero.Item[] = [];
       for (let i = 0; i < items.length; i++) {
+        throwIfAborted(signal);
         const item = items[i];
         const itemTags = item.getTags().map((t) => t.tag);
         const matchedTags: string[] = [];
@@ -936,10 +954,10 @@ export async function handleSearchRequest(
         items = scoredItems.map((si) => si.item);
       } else {
         // 非相关性排序：先排序，评分延后到分页后再算
-        items = await sortItemsWithYield(items, sort, direction);
+        items = await sortItemsWithYield(items, sort, direction, signal);
       }
     } else {
-      items = await sortItemsWithYield(items, sort, direction);
+      items = await sortItemsWithYield(items, sort, direction, signal);
     }
   }
 
@@ -956,6 +974,7 @@ export async function handleSearchRequest(
 
   const results: Record<string, any>[] = [];
   for (let i = 0; i < paginatedItems.length; i++) {
+    throwIfAborted(signal);
     const item = paginatedItems[i];
     const formatted = formatItemBrief(item);
 

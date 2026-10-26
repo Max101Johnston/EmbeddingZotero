@@ -248,3 +248,7 @@ pref-contact-title = 联系方式
 pref-contact-email = 邮箱：fransjone@mail.com
 pref-contact-github = GitHub：https://github.com/Max101Johnston/EmbeddingZotero
 pref-contact-wechat = 微信公众号：未来论文实验室
+
+pref-search-workers-label = 检索 Worker 数
+pref-search-workers-hint = 每次向量查询使用的工作线程数（1–32，默认 4）；下一次查询生效。
+pref-search-workers-invalid = 请输入 1 到 32 的整数。

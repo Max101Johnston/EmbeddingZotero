@@ -4,6 +4,7 @@
 
 <prefpane id="__addonRef__-preferences" onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window });">
   <preferences>
+    <preference id="extensions.zotero.zotero-mcp-plugin.execution.searchWorkers" name="extensions.zotero.zotero-mcp-plugin.execution.searchWorkers" type="int" />
     <preference id="extensions.zotero.zotero-mcp-plugin.mcp.server.enabled" name="extensions.zotero.zotero-mcp-plugin.mcp.server.enabled" type="bool" />
     <preference id="extensions.zotero.zotero-mcp-plugin.mcp.server.port" name="extensions.zotero.zotero-mcp-plugin.mcp.server.port" type="int" />
     <preference id="extensions.zotero.zotero-mcp-plugin.mcp.server.allowRemote" name="extensions.zotero.zotero-mcp-plugin.mcp.server.allowRemote" type="bool" />
@@ -311,6 +312,17 @@
 
       <!-- 内容设置 (merged into MCP server section) -->
       <html:div class="zmp-sl" data-l10n-id="pref-mcp-settings-title"></html:div>
+
+      <html:div class="zmp-f2">
+        <html:div class="zmp-fg">
+          <html:label class="zmp-fl" data-l10n-id="pref-search-workers-label"></html:label>
+          <html:input type="number" class="zmp-fi zmp-fi-s"
+            id="zotero-prefpane-__addonRef__-search-workers"
+            min="1" max="32" step="1" value="4" />
+          <html:div class="zmp-fh" data-l10n-id="pref-search-workers-hint"></html:div>
+        </html:div>
+
+      </html:div>
 
       <html:div class="zmp-f2">
         <html:div class="zmp-fg">
