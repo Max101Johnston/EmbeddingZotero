@@ -3,9 +3,9 @@
     "zotero-mcp-plugin@autoagent.my": {
       "updates": [
         {
-          "version": "1.6.6",
-          "update_link": "https://github.com/Max101Johnston/EmbeddingZotero/releases/download/v1.6.6/zotero-mcp-plugin.xpi",
-          "update_hash": "sha512:1376f50ebe75ec84264bbfa74577c56545a412618518d3e03c5101925e5c0f8843a2635e1bfdca8142113313aa14a075082217c56f5c390855225a8444483b55",
+          "version": "1.6.7",
+          "update_link": "https://github.com/Max101Johnston/EmbeddingZotero/releases/download/v1.6.7/zotero-mcp-plugin.xpi",
+          "update_hash": "sha512:89df081e2097213be4a4439bf05aaae10dfa0ac51e6f143939956cd0a9d9eaf6eae0521c2b01a7ab8e032e64d11822758d1cd8ee04d48cd45a301ba5c50f7b97",
           "applications": {
             "zotero": {
               "strict_min_version": "6.999",

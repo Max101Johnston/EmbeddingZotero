@@ -90,14 +90,14 @@ export async function testMCPIntegration(): Promise<{
     }
   }, tests);
 
-  // Test 3: Tool Call - Ping
-  await runTest('Tool Call - Ping', async () => {
+  // Exercise a registered read-only tool; ping is a protocol method, not a tool.
+  await runTest('Tool Call - Get Libraries', async () => {
     const request = {
       jsonrpc: '2.0' as const,
       id: 'test-3',
       method: 'tools/call',
       params: {
-        name: 'ping',
+        name: 'get_libraries',
         arguments: {}
       }
     };
@@ -107,10 +107,11 @@ export async function testMCPIntegration(): Promise<{
     
     const response = await (mcpServer as any).processRequest(request);
     
-    if (response.result) {
+    if (response.result?.content?.[0]?.type === 'text'
+        && Array.isArray(JSON.parse(response.result.content[0].text))) {
       return { success: true, response: response.result };
     } else {
-      throw new Error('Ping tool call failed');
+      throw new Error('Get libraries tool call failed');
     }
   }, tests);
 

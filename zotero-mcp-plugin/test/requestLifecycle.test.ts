@@ -11,6 +11,7 @@ import { PDFProcessor } from "../src/modules/pdfProcessor";
 import { EmbeddingService } from "../src/modules/semantic/embeddingService";
 import { MCPSettingsService } from "../src/modules/mcpSettingsService";
 import { runSerializedWrite } from "../src/modules/deferredNotifierCommitter";
+import { testMCPIntegration } from "../src/modules/mcpTest";
 
 describe("MCP request lifecycle", () => {
   const originalZotero = (globalThis as any).Zotero;
@@ -22,6 +23,84 @@ describe("MCP request lifecycle", () => {
   afterEach(() => {
     (globalThis as any).Zotero = originalZotero;
     (globalThis as any).ztoolkit = originalToolkit;
+  });
+  it("dispatches and cancels tool calls without a sandbox-global AbortController", async () => {
+    const windowAbortController = globalThis.AbortController;
+    const requestedGlobals: string[] = [];
+    try {
+      (globalThis as any).AbortController = undefined;
+      (globalThis as any).ztoolkit.getGlobal = (name: string) => {
+        requestedGlobals.push(name);
+        return name === "AbortController" ? windowAbortController : undefined;
+      };
+      const server = new StreamableMCPServer() as any;
+      server.callGetLibraries = async () => ({ libraries: [{ libraryID: 1 }] });
+      const call = (id: number, name: string) =>
+        server.handleMCPRequest(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name, arguments: {} },
+          }),
+          "sandbox",
+        );
+      const response = JSON.parse((await call(1, "get_libraries")).body);
+      expect(response.error).to.equal(undefined);
+      expect(response.result).to.have.property("content");
+      expect(requestedGlobals).to.include("AbortController");
+      const unknown = JSON.parse((await call(2, "__unknown_tool__")).body);
+      expect(unknown.error.message).to.include("Unknown tool");
+
+      let requestSignal!: AbortSignal;
+      server.callGetContent = async (_args: any, signal: AbortSignal) => {
+        requestSignal = signal;
+        await abortableDelay(5000, signal);
+      };
+      const pending = server.handleMCPRequest(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "get_content", arguments: { itemKey: "TEST" } },
+        }),
+        "sandbox",
+      );
+      await abortableDelay(0);
+      const cancelled = await server.handleMCPRequest(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: 3 },
+        }),
+        "sandbox",
+      );
+      expect(cancelled.status).to.equal(202);
+      expect((await pending).status).to.equal(202);
+      expect(requestSignal.aborted).to.equal(true);
+      await abortableDelay(0);
+      expect(server.getStatus().tasks).to.deep.equal({
+        active: 0,
+        draining: 0,
+        limit: 32,
+      });
+    } finally {
+      (globalThis as any).AbortController = windowAbortController;
+    }
+  });
+  it("checks tool execution through a registered read-only tool in diagnostics", async () => {
+    (globalThis as any).Zotero.Libraries = {
+      getAll: () => [{ libraryID: 1, name: "My Library", libraryType: "user" }],
+    };
+    const report = await testMCPIntegration();
+    expect(
+      report.testResults.tests.filter((test) => test.status === "FAILED"),
+    ).to.deep.equal([]);
+    expect(
+      report.testResults.tests.some(
+        (test) => test.testName === "Tool Call - Get Libraries",
+      ),
+    ).to.equal(true);
   });
   it("aborts on deadline and retains a draining task until its operation settles", async () => {
     const manager = new RequestTaskManager(1);

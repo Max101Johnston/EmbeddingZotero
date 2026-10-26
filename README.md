@@ -6,8 +6,9 @@ A Zotero plugin with an integrated Streamable HTTP MCP server and semantic searc
 
 ## Current release
 
-The plugin package version is **1.6.6**. Changes in this fork include:
+The plugin package version is **1.6.7**. Changes in this fork include:
 
+- Resolve cancellation controllers from Zotero's window when the plugin sandbox lacks the global constructor, fixing v1.6.6 tool calls returning `Internal error`.
 - Share each vector search across a configurable Worker pool (default **4**, range **1–32**).
 - Follow MCP client cancellation to remove queued tasks, stop active Workers and embedding requests, and retain in-flight database operations until they settle.
 - Send the configured output dimensions for `qwen3.7-text-embedding`, and verify the dimensions returned by the embedding API.

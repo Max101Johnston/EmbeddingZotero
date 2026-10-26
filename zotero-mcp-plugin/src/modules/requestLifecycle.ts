@@ -190,7 +190,13 @@ export class RequestTaskManager {
         -32002,
         "Too many active requests; retry after current requests finish",
       );
-    const controller = new AbortController();
+    // loadSubScript's plugin scope does not expose every DOM constructor.
+    // The toolkit resolves missing constructors from Zotero's main window.
+    const Controller =
+      typeof AbortController === "function"
+        ? AbortController
+        : ztoolkit.getGlobal("AbortController");
+    const controller = new Controller();
     this.tasks.set(key, controller);
     const onCallerAbort = () => controller.abort(abortReason(callerSignal));
     callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
